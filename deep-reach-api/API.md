@@ -46,10 +46,16 @@ Invalid values fail fast at startup with a descriptive error.
 | GET    | `/health`                | Probe both upstreams in parallel; always 200                     |
 | GET    | `/`                      | Service index                                                     |
 
-All responses carry permissive CORS headers (`Access-Control-Allow-Origin: *`,
-methods `GET, POST, OPTIONS`, allowed header `content-type`); `OPTIONS`
-preflights are answered 204 with no body. Trailing slashes are normalized
-(`/research/` routes to `/research`).
+All responses carry the same CORS headers as deep-reach-backend (paperbot):
+`Access-Control-Allow-Origin: *` (fixed — no origin reflection, no `Vary`),
+`Access-Control-Allow-Methods: GET, POST, OPTIONS`,
+`Access-Control-Allow-Headers: content-type`. Non-preflight responses add one
+thing paperbot does not: `Access-Control-Expose-Headers: content-type,
+content-disposition, x-paperbot-warnings`, so browsers can read the metadata
+of streamed download/render bytes. `OPTIONS` preflights (any path, including
+unknown routes) are answered **204** with those headers, no body, and no
+upstream contact. Trailing slashes are normalized (`/research/` routes to
+`/research`).
 
 ## GET /
 
@@ -257,7 +263,8 @@ for rendering arbitrary documents that did not come out of `/research`.
 
 ## Everything else
 
-- `OPTIONS` → **204**, no body, CORS headers.
+- `OPTIONS` (any path) → **204**, no body, CORS headers; upstreams are never
+  contacted for preflights.
 - Any other method/path → **404** `{"error": "not found"}`.
 
 ## Error semantics
@@ -305,10 +312,12 @@ until it finishes on its own).
 
 - No authentication: bind to localhost or put the service (and both
   upstreams) behind an authenticating proxy.
-- Permissive CORS is intentional so browser front-ends work out of the box;
-  restrict origins at a proxy if exposed to untrusted networks.
+- CORS mirrors paperbot's deliberately permissive setup (`*` origin, fixed
+  method/header allow-lists, no credentials) so browser front-ends work out
+  of the box; restrict origins at a proxy if exposed to untrusted networks.
 - Stateless single process: the only state that exists is the worker's
   in-memory task store — a worker restart loses its tasks.
-- Implementation is two files: `src/app.ts` (router) and `src/upstream.ts`
-  (transport: timeout, error mapping, body passthrough, link rewriting,
-  CORS). Run with [Bun](https://bun.sh); `bun run typecheck` for types.
+- Implementation is three files: `src/app.ts` (router), `src/cors.ts`
+  (paperbot-compatible CORS), and `src/upstream.ts` (transport: timeout, error
+  mapping, body passthrough, link rewriting). Run with
+  [Bun](https://bun.sh); `bun run typecheck` for types.
