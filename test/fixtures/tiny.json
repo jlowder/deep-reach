@@ -1,0 +1,14 @@
+{
+  "report": {
+    "metadata": { "title": "Tiny" },
+    "sections": [
+      {
+        "heading": "",
+        "blocks": [
+          { "type": "paragraph", "spans": [ { "text": "A." } ] }
+        ]
+      }
+    ],
+    "sources": []
+  }
+}

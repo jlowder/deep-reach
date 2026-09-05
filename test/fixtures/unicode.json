@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "report": {
+    "metadata": {
+      "title": "Unicode & Injection Fixtures",
+      "author": "Test Author",
+      "generated_at": "2026-08-26T12:00:00Z",
+      "report_type": "deep_research"
+    },
+    "executive_summary": [
+      "Café, naïve, coöperate — “Quoted text” in the summary."
+    ],
+    "sections": [
+      {
+        "heading": "Unicode coverage",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "spans": [
+              { "text": "“Quoted text” — café, naïve, coöperate", "citations": [] },
+              { "text": "Greek: α β γ; math: ∑ ∫ ≤ ≥ ≠", "citations": [] },
+              { "text": "No-break space: word\u00a0word", "citations": [] },
+              { "text": "東京のテスト", "citations": [] },
+              { "text": "العربية والهندية", "citations": [] },
+              { "text": "हिन्दी भाषा", "citations": [] },
+              { "text": "Emoji: ✅ and 🔥", "citations": [] }
+            ]
+          }
+        ]
+      },
+      {
+        "heading": "Injection attempts",
+        "blocks": [
+          {
+            "type": "paragraph",
+            "spans": [
+              { "text": "Safe before <script>alert(1)</script> after", "citations": [] }
+            ]
+          },
+          {
+            "type": "callout",
+            "callout_type": "warning",
+            "callout_title": "On<error onmouseover=x>",
+            "spans": [
+              { "text": "Attributes are escaped too: \"quoted\" & 'single'", "citations": [] }
+            ]
+          }
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "title": "Inj <img onerror=x> & “quotes” source",
+        "URL": "https://example.com/a?b=1&c=2",
+        "citation_key": "W1"
+      }
+    ]
+  },
+  "quality": {}
+}
