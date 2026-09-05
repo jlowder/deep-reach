@@ -1,0 +1,684 @@
+"""Phase 3 tests: structured assembly helpers + JSON-mode deep pipeline.
+
+Covers registry_to_sources (plan section 8.1), assemble_structured_report
+renumbering/flagging (plan section 6.3), parse_exec_summary salvage,
+sections_plain_text, and one end-to-end deep_research(output_format="json")
+run with every LLM call monkeypatched (plan sections 9.3 / 9.4).
+"""
+
+import importlib
+import json
+import shutil
+import tempfile
+from pathlib import Path
+
+import pytest
+
+import deep_research_orchestrator as dpo
+from deep_research_structured import (
+    assemble_structured_report,
+    parse_exec_summary,
+    sections_plain_text,
+)
+from memory.helpers import registry_to_sources
+from models.report_schema import (
+    BlockType,
+    QualityMetrics,
+    Metadata,
+    Report,
+    ReportBlock,
+    ResearchReport,
+    Section,
+    Span,
+)
+
+# importlib (not `import ... as`): worker_agents/__init__.py re-exports the
+# writer_agent function, shadowing the module name in the package namespace.
+dmod = importlib.import_module("worker_agents.decomposition_agent")
+rmod = importlib.import_module("worker_agents.retriever_agent")
+wmod = importlib.import_module("worker_agents.writer_agent")
+vmod = importlib.import_module("worker_agents.verifier_agent")
+
+_CACHE_TMP_DIRS: list = []
+
+
+class _FakeResponse:
+    """Minimal stand-in for ModelResponse: .output_text / .output_parsed."""
+
+    def __init__(self, text: str = "", parsed=None):
+        self.output_text = text
+        self.output_parsed = parsed
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_evidence_cache_tmp_dirs():
+    yield
+    for d in _CACHE_TMP_DIRS:
+        shutil.rmtree(d, ignore_errors=True)
+    _CACHE_TMP_DIRS.clear()
+
+
+DOC_A = {
+    "kind": "doc",
+    "title": "Alpha Study",
+    "document_name": "alpha.pdf",
+    "page_number": 3,
+    "citation": "Alpha Study, p. 3",
+    "score": 0.9,
+}
+DOC_B = {
+    "kind": "doc",
+    "title": "Beta Report",
+    "document_name": "beta.pdf",
+    "page_number": 1,
+    "citation": "Beta Report, p. 1",
+    "score": 0.8,
+}
+WEB_A = {
+    "kind": "web",
+    "title": "Web A",
+    "url": "https://example.com/a",
+    "published_date": "2023",
+    "score": 0.8,
+}
+
+
+def _make_report(*sections) -> ResearchReport:
+    report = Report(
+        metadata=Metadata(
+            title="T",
+            query="q",
+            session_id="s1",
+            generated_at="2025-01-01T00:00:00Z",
+        ),
+        executive_summary=[],
+        sections=list(sections),
+        sources=[],
+    )
+    return ResearchReport(report=report, quality=QualityMetrics())
+
+
+def _para(text_cits) -> ReportBlock:
+    return ReportBlock(
+        type=BlockType.paragraph,
+        spans=[Span(text=t, citations=list(c)) for t, c in text_cits],
+    )
+
+
+def _pad_span(n: int = 40):
+    """(text, citations) filler: pushes a stub section past the assemble
+    ship-guard's 30-word floor so tests of other behavior are unaffected.
+    Citations on the real spans above are what those tests exercise."""
+    return (" ".join(f"fact{i}" for i in range(n)), [])
+
+
+def _all_citations(rep: ResearchReport):
+    return [
+        c
+        for s in rep.report.sections
+        for b in s.blocks
+        for sp in b.spans
+        for c in sp.citations
+    ]
+
+
+class TestRegistryToSources:
+    def test_web_record(self):
+        recs = registry_to_sources({"W1": dict(WEB_A)}, ["W1"])
+        assert len(recs) == 1
+        r = recs[0]
+        assert r["id"] == "source-w1"
+        assert r["type"] == "webpage"
+        assert r["title"] == "Web A"
+        assert r["URL"] == "https://example.com/a"
+        assert r["issued"] == {"date-parts": [[2023]]}
+        assert r["citation_key"] == "W1"
+        assert all(v is not None for v in r.values())
+
+    def test_doc_record(self):
+        recs = registry_to_sources({"D1": dict(DOC_A)}, ["D1"])
+        assert len(recs) == 1
+        r = recs[0]
+        assert r["id"] == "source-d1"
+        assert r["type"] == "report"
+        assert r["title"] == "Alpha Study"
+        assert r["citation_key"] == "D1"
+        assert r["URL"] == ""
+
+    def test_only_cited_keys(self):
+        reg = {"D1": dict(DOC_A), "D2": dict(DOC_B)}
+        recs = registry_to_sources(reg, ["D2"])
+        assert [r["citation_key"] for r in recs] == ["D2"]
+
+    def test_doc_dedupe_keeps_primary(self):
+        reg = {
+            "D1": dict(DOC_A),
+            "D2": dict(DOC_B),
+            "D3": dict(DOC_A, page_number=7),
+        }
+        recs = registry_to_sources(reg, ["D1", "D3", "D2"])
+        assert len(recs) == 2
+        assert recs[0]["citation_key"] == "D1"
+        assert recs[1]["citation_key"] == "D2"
+
+    def test_missing_fields_empty_not_null(self):
+        web = {"kind": "web", "title": "NoDate", "url": "https://x.test/n"}
+        recs = registry_to_sources({"W2": web}, ["W2"])
+        r = recs[0]
+        assert not r.get("issued")
+        assert r.get("author", []) == []
+        assert all(v is not None for v in r.values())
+
+
+class TestAssemble:
+    def _assemble(self, *sections, registry):
+        return assemble_structured_report(
+            sections=list(sections),
+            registry=registry,
+            user_query="q",
+            session_id="s1",
+            exec_paragraphs=["Ex."],
+            verification_status={"confidence": "high"},
+            title="T",
+        )
+
+    def test_renumber_first_appearance_order(self):
+        s1 = Section(id="s1", heading="One", blocks=[_para([("A.", ["W1", "D1"]), ("B.", []), _pad_span()])])
+        s2 = Section(id="s2", heading="Two", blocks=[_para([("C.", ["D2"]), ("D.", ["W1"]), _pad_span()])])
+        reg = {"D1": dict(DOC_A), "D2": dict(DOC_B), "W1": dict(WEB_A)}
+        rep = self._assemble(s1, s2, registry=reg)
+        assert _all_citations(rep) == ["1", "2", "3", "1"]
+        types = [s.type for s in rep.report.sources]
+        assert types == ["webpage", "report", "report"]
+        assert all(s.citation_key for s in rep.report.sources)
+
+    def test_invented_key_dropped_and_flagged(self):
+        s1 = Section(id="s1", heading="One", blocks=[_para([("A.", ["W1"]), ("B.", ["D9"]), _pad_span()])])
+        rep = self._assemble(s1, registry={"W1": dict(WEB_A)})
+        assert _all_citations(rep) == ["1"]
+        assert rep.quality.verification.get("unresolvable_citations") == ["D9"]
+
+    def test_bare_numeric_out_of_range_dropped(self):
+        block = ReportBlock(
+            type=BlockType.paragraph,
+            # Filler words in the block text (the citation shorthand only
+            # merges into a span when the block has none) keep this section
+            # past the ship-guard's 30-word floor.
+            text="Bare. " + " ".join(f"fact{i}" for i in range(40)),
+            citations=["7", "W1"],
+        )
+        s1 = Section(id="s1", heading="One", blocks=[block])
+        rep = self._assemble(s1, registry={"W1": dict(WEB_A)})
+        assert _all_citations(rep) == ["1"]
+        assert "7" in rep.quality.verification.get("dropped_bare_citations", [])
+
+    def test_quality_metrics(self):
+        s1 = Section(id="s1", heading="One", blocks=[_para([("A fact here.", ["W1"]), _pad_span()])])
+        rep = self._assemble(s1, registry={"W1": dict(WEB_A)})
+        assert rep.report.metadata.title == "T"
+        assert rep.report.executive_summary == ["Ex."]
+        assert rep.quality.sources_count == {"documents": 0, "web": 1}
+        assert rep.quality.total_words > 0
+        assert rep.quality.verification.get("confidence") == "high"
+        assert isinstance(rep.quality.citation_density, dict)
+
+    def test_empty_section_soft(self):
+        # Ship guard: an empty section ships with a gap-notice paragraph
+        # (heading preserved) plus a verification gap — never bare.
+        rep = self._assemble(
+            Section(id="s1", heading="Empty", blocks=[]), registry={}
+        )
+        assert rep.report.sections[0].heading == "Empty"
+        notice = rep.report.sections[0].blocks[0]
+        assert notice.type == BlockType.paragraph
+        assert "no content was generated" in notice.spans[0].text
+        assert rep.report.sources == []
+        # 1 exec word + 19 gap-notice words (no blocks otherwise).
+        assert rep.quality.total_words == 20
+        assert rep.quality.verification["gaps"] == ["not_generated: Empty"]
+        assert isinstance(rep.quality.citation_density, dict)
+
+
+class TestCitationRemap:
+    def _assemble(self, *sections, registry):
+        return assemble_structured_report(
+            sections=list(sections),
+            registry=registry,
+            user_query="q",
+            session_id="s1",
+            exec_paragraphs=["Ex."],
+            verification_status={"confidence": "high"},
+            title="T",
+        )
+
+    def test_deduped_sources_remap_citations_and_markers(self):
+        # 3 chunks of one document + 2 results of one URL: 5 registry keys
+        # dedupe to 2 source records (first-cited key of each unit primary).
+        reg = {
+            "D1": dict(DOC_A),
+            "D2": dict(DOC_A, page_number=4),
+            "D3": dict(DOC_A, page_number=5),
+            "W1": dict(WEB_A),
+            "W2": dict(WEB_A),
+        }
+        s1 = Section(id="s1", heading="One", blocks=[_para([
+            ("Alpha claims [D1] and [D2, D3] clearly.", ["D1", "D2", "D3"]),
+            ("Web says [W1] while [W2] agrees.", ["W1", "W2"]),
+            _pad_span(),
+        ])])
+        rep = self._assemble(s1, registry=reg)
+        assert [s.citation_key for s in rep.report.sources] == ["D1", "W1"]
+        spans = rep.report.sections[0].blocks[0].spans
+        assert [sp.citations for sp in spans] == [["1"], ["2"], []]
+        assert all(c in ("1", "2") for sp in spans for c in sp.citations)
+        # Text markers rewritten onto the surviving keys; deduped keys gone.
+        assert "[D1]" in spans[0].text
+        assert "[D2" not in spans[0].text and "[D3" not in spans[0].text
+        assert "[W1]" in spans[1].text and "[W2" not in spans[1].text
+
+    def test_in_range_report_unchanged(self):
+        reg = {"D1": dict(DOC_A)}
+        s1 = Section(id="s1", heading="One", blocks=[_para([
+            ("Alpha result [D1] holds.", ["D1"]),
+            _pad_span(),
+        ])])
+        rep = self._assemble(s1, registry=reg)
+        assert [s.citation_key for s in rep.report.sources] == ["D1"]
+        span = rep.report.sections[0].blocks[0].spans[0]
+        assert span.text == "Alpha result [D1] holds."
+        assert span.citations == ["1"]
+
+    def test_stale_numeric_dropped_unknown_marker_left(self):
+        reg = {"D1": dict(DOC_A)}
+        s1 = Section(id="s1", heading="One", blocks=[_para([
+            ("Alpha [D1] and stale [D9] here.", ["D1", "D9", "7"]),
+            _pad_span(),
+        ])])
+        rep = self._assemble(s1, registry=reg)
+        span = rep.report.sections[0].blocks[0].spans[0]
+        assert span.citations == ["1"]  # stale number dropped
+        assert "[D1]" in span.text
+        assert "[D9]" in span.text  # no surviving record: left untouched
+        assert rep.quality.verification.get("unresolvable_citations") == ["D9"]
+
+
+class TestParseExecSummary:
+    def test_json_array(self):
+        assert parse_exec_summary('["A.", "B." ]') == ["A.", "B."]
+        assert parse_exec_summary('["A.", "", "B." ]') == ["A.", "B."]
+
+    def test_salvage_prose(self):
+        assert parse_exec_summary("First para.\n\nSecond para.") == [
+            "First para.",
+            "Second para.",
+        ]
+
+    def test_garbage_never_raises(self):
+        # JSON-ish residue (starts with { or [) is stripped, not salvaged:
+        # an apology + raw JSON must not ship as the executive summary.
+        assert parse_exec_summary("{not json") == []
+        assert parse_exec_summary("") == []
+
+
+class TestSectionsPlainText:
+    def test_markers_rendered(self):
+        s = Section(
+            id="s1",
+            heading="H",
+            blocks=[_para([("abc", ["D1", "W2"]), ("def", [])])],
+        )
+        assert sections_plain_text(s) == "abc [D1, W2] def"
+
+
+PLAN_JSON = json.dumps(
+    {
+        "is_simple": False,
+        "report_title": "Test Report Title",
+        "sub_questions": [
+            {
+                "id": "sq1",
+                "question": "What is X?",
+                "angle": "definition",
+                "expected_sources": "both",
+                "priority": 1,
+                "heading": "Section One",
+            },
+            {
+                "id": "sq2",
+                "question": "How does X work?",
+                "angle": "mechanics",
+                "expected_sources": "both",
+                "priority": 2,
+                "heading": "Section Two",
+            },
+        ],
+    }
+)
+SUFFICIENT_JSON = json.dumps(
+    {
+        "is_sufficient": True,
+        "summary": "enough evidence",
+        "missing_aspects": [],
+        "follow_up_queries": [],
+    }
+)
+CRITIC_JSON = json.dumps(
+    {
+        "confidence_level": "high",
+        "overall_summary": "solid",
+        "hallucinated_claims": [],
+        "unsupported_claims": [],
+        "per_section": [
+            {"section_id": "sq1", "grounded": True, "depth_ok": True, "gaps": []},
+            {"section_id": "sq2", "grounded": True, "depth_ok": True, "gaps": []},
+        ],
+        "re_retrieve_suggested": False,
+        "specific_queries": [],
+    }
+)
+
+
+def _json_section(i):
+    if i == 0:
+        return json.dumps(
+            {
+                "id": "section-one",
+                "heading": "Section One",
+                "blocks": [
+                    {
+                        "type": "paragraph",
+                        "spans": [
+                            {"text": "First fact.", "citations": ["W1"]},
+                            {"text": "Doc fact.", "citations": ["D1"]},
+                            # Past the 300-word must-revise contract floor.
+                            {
+                                "text": " ".join(
+                                    f"fact{i}" for i in range(310)
+                                ),
+                                "citations": [],
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    if i == 1:
+        return json.dumps(
+            {
+                "id": "section-two",
+                "heading": "Section Two",
+                "blocks": [
+                    {
+                        "type": "paragraph",
+                        "spans": [
+                            {"text": "Second doc fact.", "citations": ["D2"]},
+                            {"text": "Invented key fact.", "citations": ["D9"]},
+                            {"text": "Back to web.", "citations": ["W1"]},
+                            # Past the 300-word must-revise contract floor.
+                            {
+                                "text": " ".join(
+                                    f"fact{i}" for i in range(310)
+                                ),
+                                "citations": [],
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+    raise AssertionError(f"unexpected writer call {i}")
+
+
+def _install_json_stubs(monkeypatch):
+    monkeypatch.setattr(
+        dpo, "_read_doc_catalog",
+        lambda: [
+            {"document_name": "alpha.pdf", "document_title": "Alpha Study"},
+            {"document_name": "beta.pdf", "document_title": "Beta Report"},
+        ],
+    )
+    ecache_mod = importlib.import_module("memory.evidence_cache")
+    cache_tmp_dir = tempfile.mkdtemp(prefix="evidence_cache_asm_")
+    _CACHE_TMP_DIRS.append(cache_tmp_dir)
+    monkeypatch.setattr(
+        ecache_mod, "EVIDENCE_CACHE_DB_PATH",
+        Path(cache_tmp_dir) / "evidence_cache_test.db",
+    )
+    monkeypatch.setattr(ecache_mod, "_purged_this_process", False)
+    monkeypatch.setattr(
+        rmod, "retrieve_document",
+        lambda *a, **k: {
+            "query": a[0] if a else "",
+            "chunks": [
+                {
+                    "document_name": "alpha.pdf",
+                    "document_title": "Alpha Study",
+                    "chunk_id": "c1",
+                    "content": "alpha chunk",
+                    "score": 0.9,
+                },
+                {
+                    "document_name": "beta.pdf",
+                    "document_title": "Beta Report",
+                    "chunk_id": "c2",
+                    "content": "beta chunk",
+                    "score": 0.8,
+                },
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        rmod, "web_search",
+        lambda query: {
+            "query": query,
+            "results": [
+                {
+                    "title": "Web A",
+                    "url": "https://example.com/a",
+                    "content": "web content",
+                    "score": 0.9,
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(dmod, "run_model", lambda *a, **k: _FakeResponse(text=PLAN_JSON))
+    monkeypatch.setattr(
+        rmod, "run_model", lambda *a, **k: _FakeResponse(text=SUFFICIENT_JSON)
+    )
+    calls = []
+
+    def writer_stub(*a, **k):
+        calls.append(k)
+        return _FakeResponse(text=_json_section(len(calls) - 1))
+
+    monkeypatch.setattr(wmod, "run_model", writer_stub)
+    monkeypatch.setattr(
+        vmod, "run_model", lambda *a, **k: _FakeResponse(text=CRITIC_JSON)
+    )
+    monkeypatch.setattr(
+        dpo, "run_model",
+        lambda *a, **k: _FakeResponse(text=json.dumps(["Para one.", "Para two."])),
+    )
+    return calls
+
+
+def test_deep_research_json_mode_e2e(monkeypatch):
+    calls = _install_json_stubs(monkeypatch)
+    result = dpo.deep_research(
+        "test research query", verbose=False, max_rounds=3, output_format="json"
+    )
+
+    # JSON mode: final_answer is the deterministic Markdown rendering
+    # (Phase 4); report_json carries the canonical document.
+    assert result["final_answer"].startswith("# Test Report Title")
+    assert "[^1]" in result["final_answer"]
+    assert "## Executive Summary" in result["final_answer"]
+    state = result["state"]
+    assert "report_json" in state
+    rep = ResearchReport.model_validate_json(state["report_json"])
+    assert rep.schema_version == "1.0"
+
+    # Title comes from the decomposer plan (report_title field).
+    assert rep.report.metadata.title == "Test Report Title"
+    assert rep.report.metadata.query == "test research query"
+
+    # Executive summary parsed from the JSON array.
+    assert rep.report.executive_summary == ["Para one.", "Para two."]
+
+    # Sections preserved in order.
+    assert [s.heading for s in rep.report.sections] == [
+        "Section One",
+        "Section Two",
+    ]
+
+    # Every citation renumbered to a digit; 3 unique sources (W1, D1, D2).
+    cits = _all_citations(rep)
+    assert all(c.isdigit() for c in cits)
+    assert set(cits) == {"1", "2", "3"}
+    assert "D9" not in cits
+    assert len(rep.report.sources) == 3
+    types = sorted(s.type for s in rep.report.sources)
+    assert types == ["report", "report", "webpage"]
+
+    # Invented key flagged; no bare numerics dropped (none were present).
+    q = rep.quality
+    assert q.verification.get("unresolvable_citations") == ["D9"]
+    assert q.verification.get("dropped_bare_citations") == []
+    assert q.sources_count == {"documents": 2, "web": 1}
+    assert q.total_words > 0
+    assert isinstance(q.citation_density, dict)
+
+    # Legacy state compatibility for the UI / standard handlers.
+    assert state["citation_density"] == q.citation_density
+    assert state["verification"] == ""
+    assert state["draft"] == ""
+    secs = state["sections"]
+    assert [s["id"] for s in secs] == ["sq1", "sq2"]
+    assert all(set(s) == {"id", "heading", "text"} for s in secs)
+    assert all(s["text"] for s in secs)
+
+    # Writer JSON mode was actually used (two section calls, no synthesis).
+    assert len(calls) == 2
+
+
+def test_assemble_guards_preserve_existing_gaps_and_drop_empty_synthesis():
+    # 5-word content section -> gap notice + "not_generated" gap appended
+    # AFTER the existing verification gaps; 500-word section untouched;
+    # empty synthesis dropped (degradation shape). render_markdown must run
+    # on the result.
+    short = Section(
+        id="s1",
+        heading="Short Area",
+        blocks=[_para([("Tiny bit.", []), ("More words.", []), ("Here.", []), ("Now.", []), ("Five.", [])])],
+    )
+    long = Section(
+        id="s2",
+        heading="Long Area",
+        blocks=[_para([(" ".join(f"word{i}" for i in range(500)), [])])],
+    )
+    empty_synth = Section(id="synthesis", heading="Synthesis", blocks=[])
+    rep = assemble_structured_report(
+        sections=[short, long, empty_synth],
+        registry={},
+        user_query="q",
+        session_id="s1",
+        exec_paragraphs=["Ex."],
+        verification_status={"gaps": ["existing gap"]},
+        title="T",
+    )
+    assert [s.heading for s in rep.report.sections] == ["Short Area", "Long Area"]
+    assert "no content was generated" in rep.report.sections[0].blocks[0].spans[0].text
+    assert rep.report.sections[1].blocks[0].spans[0].text.startswith("word0")
+    assert rep.quality.verification["gaps"] == [
+        "existing gap",
+        "not_generated: Short Area",
+    ]
+    from memory.save_report import render_markdown
+
+    md = render_markdown(rep)
+    assert "### Short Area" in md and "### Long Area" in md
+    assert "Synthesis" not in md
+
+
+class TestExecSummaryResidueRescue:
+    """F5: a small residue array must not dead-end the prose salvage path."""
+
+    def test_residue_array_yields_prose_rescue(self):
+        text = 'real prose para one.\nSecond para.\n["residue line"]'
+        paras = parse_exec_summary(text)
+        joined = " ".join(paras)
+        assert "residue" not in joined
+        assert "real prose para one." in joined and "Second para." in joined
+
+    def test_real_array_beats_earlier_residue(self):
+        text = (
+            '["residue line"]\n'
+            '["First real paragraph with substance.", "Second real paragraph."] '
+            'trailing'
+        )
+        assert parse_exec_summary(text) == [
+            "First real paragraph with substance.",
+            "Second real paragraph.",
+        ]
+
+
+def test_short_content_section_titled_synthesis_gets_gap_notice():
+    # A chemistry section HAPPENS to be titled "Synthesis" (id is not
+    # "synthesis") — it must get the gap notice, never a silent drop.
+    short = Section(
+        id="chemistry-of-synthesis",
+        heading="Synthesis",
+        blocks=[_para([("Tiny bit.", [])])],
+    )
+    body = Section(
+        id="body",
+        heading="Body",
+        blocks=[_para([(" ".join(f"w{i}" for i in range(400)), [])])],
+    )
+    rep = assemble_structured_report(
+        sections=[short, body],
+        registry={},
+        user_query="q",
+        session_id="s1",
+        exec_paragraphs=["Ex."],
+        verification_status={},
+        title="T",
+    )
+    assert [s.heading for s in rep.report.sections] == ["Synthesis", "Body"]
+    assert "no content was generated" in rep.report.sections[0].blocks[0].spans[0].text
+    assert rep.quality.verification["gaps"] == ["not_generated: Synthesis"]
+
+
+def test_short_section_with_synthesis_id_dropped():
+    # id "synthesis" is authoritative even when a content section holds it.
+    synth = Section(
+        id="synthesis",
+        heading="Synthesis",
+        blocks=[_para([("Tiny bit.", [])])],
+    )
+    body = Section(
+        id="body",
+        heading="Body",
+        blocks=[_para([(" ".join(f"w{i}" for i in range(400)), [])])],
+    )
+    rep = assemble_structured_report(
+        sections=[body, synth],
+        registry={},
+        user_query="q",
+        session_id="s1",
+        exec_paragraphs=["Ex."],
+        verification_status={},
+        title="T",
+    )
+    assert [s.heading for s in rep.report.sections] == ["Body"]
+
+
+def test_exec_summary_citation_lead_in_line_kept():
+    # F7: a line STARTING with a short citation token is prose, not JSON
+    # residue.
+    text = "[1] shows real finding.\n\nSecond para."
+    assert parse_exec_summary(text) == ["[1] shows real finding.", "Second para."]
+    # A multi-item array of prose is a summary; a lone short item is
+    # residue (the F5 single-item rule) and still falls to salvage.
+    assert parse_exec_summary('["one line", "two line"]') == ["one line", "two line"]
+    assert parse_exec_summary('["residue line"]') == []
