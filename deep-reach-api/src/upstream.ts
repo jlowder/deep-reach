@@ -28,8 +28,32 @@ export interface UpstreamJsonResult {
 }
 
 export type UpstreamBytesResult =
-  | { kind: "bytes"; status: number; headers: Headers; body: UpstreamBody }
+  | {
+      kind: "bytes";
+      status: number;
+      headers: Headers;
+      body: UpstreamBody;
+      /** Abort the upstream fetch (releases the upstream socket for a gone client). */
+      release: () => void;
+    }
   | { kind: "error"; status: number; data: unknown };
+
+/**
+ * Controllers of live upstream fetches, keyed by their Response. In Bun,
+ * aborting the fetch's own signal is what tears down the upstream socket for
+ * a body that is already streaming (calling body.cancel() on the Response's
+ * stream does not propagate to the fetch).
+ */
+const controllers = new WeakMap<Response, AbortController>();
+
+/** Abort the upstream fetch that produced `res`; no-op for foreign responses. */
+export function releaseUpstream(res: Response): void {
+  try {
+    controllers.get(res)?.abort();
+  } catch {
+    /* already settled */
+  }
+}
 
 const baseFor = (name: UpstreamName): string =>
   name === "worker" ? config.workerUrl : config.paperbotUrl;
@@ -40,9 +64,12 @@ function absoluteUrl(name: UpstreamName, path: string): string {
 }
 
 /**
- * Fetch an upstream with a timeout. Resolves with the raw Response (caller
- * inspects .status); throws UpstreamError 504 on timeout, 502 on network
- * failure.
+ * Fetch an upstream with a deadline timeout. Resolves with the raw Response
+ * (caller inspects .status); throws UpstreamError 504 on timeout, 502 on
+ * network failure. A client signal in init is threaded in for the response's
+ * whole lifetime: if the client goes away (mid-flight or mid-body), the
+ * upstream request is aborted so the upstream socket is released. Release the
+ * Response with releaseUpstream() if the client abandons a streamed body.
  */
 export async function upstreamFetch(
   name: UpstreamName,
@@ -52,10 +79,23 @@ export async function upstreamFetch(
 ): Promise<Response> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const clientSignal = init.signal ?? null;
+  const onClientAbort = () => controller.abort();
+  if (clientSignal) {
+    if (clientSignal.aborted) controller.abort();
+    else clientSignal.addEventListener("abort", onClientAbort, { once: true });
+  }
   try {
-    return await fetch(absoluteUrl(name, path), { ...init, signal: controller.signal });
+    const res = await fetch(absoluteUrl(name, path), { ...init, signal: controller.signal });
+    controllers.set(res, controller);
+    return res;
   } catch (err) {
     if (controller.signal.aborted) {
+      if (clientSignal?.aborted) {
+        // Client went away; rethrow the fetch abort so the route bails out
+        // without manufacturing a spurious 504 for a dead client.
+        throw err;
+      }
       throw new UpstreamError(
         504,
         `${name} timed out`,
@@ -69,6 +109,8 @@ export async function upstreamFetch(
     );
   } finally {
     clearTimeout(timer);
+    // Note: the client-abort listener is intentionally kept until the signal
+    // (i.e. the client request) is released, so it also covers mid-body.
   }
 }
 
@@ -85,6 +127,28 @@ function errorData(name: UpstreamName, status: number, text: string): unknown {
 }
 
 /**
+ * Read a response body as text, releasing the upstream if the client aborts
+ * first (Bun does not cancel a fetch body from the reader side). Rejects if
+ * the release wins the race; callers treat that as a dead client.
+ */
+export async function readText(res: Response, signal?: AbortSignal | null): Promise<string> {
+  let onAbort: (() => void) | undefined;
+  if (signal) {
+    onAbort = () => {
+      releaseUpstream(res);
+      res.body?.cancel().catch(() => {});
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
+  try {
+    return await res.text();
+  } finally {
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
  * Fetch + JSON-decode an upstream response. Both ok and error bodies pass
  * through with the upstream's status.
  */
@@ -94,7 +158,7 @@ export async function upstreamJson(
   init?: RequestInit,
 ): Promise<UpstreamJsonResult> {
   const res = await upstreamFetch(name, path, init);
-  const text = await res.text();
+  const text = await readText(res, init?.signal);
   if (!res.ok) return { status: res.status, data: errorData(name, res.status, text) };
   try {
     return { status: res.status, data: JSON.parse(text) };
@@ -112,25 +176,34 @@ export async function upstreamBytes(
   name: UpstreamName,
   path: string,
   init?: RequestInit,
-  extraHeaders?: Record<string, string>,
 ): Promise<UpstreamBytesResult> {
   const headers = new Headers(init?.headers);
-  if (extraHeaders) {
-    for (const [key, value] of Object.entries(extraHeaders)) headers.set(key, value);
-  }
   const res = await upstreamFetch(name, path, { ...init, headers });
   if (!res.ok) {
-    const text = await res.text();
+    const text = await readText(res, init?.signal);
     return { kind: "error", status: res.status, data: errorData(name, res.status, text) };
   }
   const body: UpstreamBody = res.body ?? new ReadableStream<Uint8Array>({ start: (c) => c.close() });
-  return { kind: "bytes", status: res.status, headers: res.headers, body };
+  return { kind: "bytes", status: res.status, headers: res.headers, body, release: () => releaseUpstream(res) };
 }
 
-/** Serialize an upstreamBytes result: stream bytes (headers preserved) or JSON the error. */
-export function toResponse(result: UpstreamBytesResult): Response {
+/**
+ * Serialize an upstreamBytes result: stream bytes (headers preserved) or JSON
+ * the error. With the client's abort signal, releases the upstream fetch when
+ * the client goes away mid-stream so the upstream socket is closed.
+ */
+export function toResponse(result: UpstreamBytesResult, clientSignal?: AbortSignal | null): Response {
   if (result.kind === "bytes") {
-    return withCors(new Response(result.body, { status: result.status, headers: result.headers }));
+    const res = withCors(new Response(result.body, { status: result.status, headers: result.headers }));
+    if (clientSignal) {
+      const release = () => {
+        result.release();
+        result.body.cancel().catch(() => {});
+      };
+      if (clientSignal.aborted) release();
+      else clientSignal.addEventListener("abort", release, { once: true });
+    }
+    return res;
   }
   return jsonResponse(result.data, result.status);
 }
@@ -155,17 +228,18 @@ export function rewriteLinks(base: string, task: { id: string }, json: any): any
 }
 
 /** JSON response with CORS applied. */
-export function jsonResponse(data: unknown, status = 200, headers?: Record<string, string>): Response {
-  return withCors(new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...headers } }));
+export function jsonResponse(data: unknown, status = 200): Response {
+  return withCors(
+    new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } }),
+  );
 }
 
 /** Map any error raised during an upstream call to a client Response. */
 export function mapUpstreamError(err: unknown, name: UpstreamName): Response {
   if (err instanceof UpstreamError) {
-    return jsonResponse(
-      { error: err.status === 504 ? `${name} timed out` : `${name} unreachable`, detail: err.detail },
-      err.status,
-    );
+    // err.message is client-safe and specific ("worker unreachable", "worker
+    // timed out", "worker returned invalid JSON"); detail adds context.
+    return jsonResponse({ error: err.message, detail: err.detail }, err.status);
   }
   return jsonResponse(
     { error: "internal error", detail: err instanceof Error ? err.message : String(err) },
