@@ -6,6 +6,7 @@ import {
   UpstreamName,
   jsonResponse,
   mapUpstreamError,
+  readText,
   rewriteLinks,
   toResponse,
   upstreamBytes,
@@ -23,7 +24,8 @@ export async function app(req: Request): Promise<Response> {
   const url = new URL(req.url);
   let path = url.pathname.replace(/\/+$/, "");
   if (path === "") path = "/";
-  const method = req.method.toUpperCase();
+  let method = req.method.toUpperCase();
+  if (method === "HEAD") method = "GET"; // routes below; Bun omits the body for HEAD
 
   if (method === "OPTIONS") return preflight();
 
@@ -39,9 +41,9 @@ export async function app(req: Request): Promise<Response> {
 
 async function route(method: string, path: string, req: Request): Promise<Response> {
   if (method === "GET" && path === "/") return getIndex();
-  if (method === "GET" && path === "/health") return getHealth();
+  if (method === "GET" && path === "/health") return getHealth(clientSignal(req));
   if (method === "POST" && path === "/research") return postResearch(req);
-  if (method === "GET" && path === "/research") return getResearchList();
+  if (method === "GET" && path === "/research") return getResearchList(clientSignal(req));
   if (method === "POST" && path === "/render") return postRender(req);
 
   const segs = path.split("/").filter((s) => s.length > 0);
@@ -52,8 +54,8 @@ async function route(method: string, path: string, req: Request): Promise<Respon
     } catch {
       return jsonResponse({ error: "invalid task id" }, 400);
     }
-    if (segs.length === 2) return getResearch(id);
-    if (segs.length === 3 && segs[2] === "report") return getReport(id);
+    if (segs.length === 2) return getResearch(id, clientSignal(req));
+    if (segs.length === 3 && segs[2] === "report") return getReport(id, clientSignal(req));
     if (segs.length === 3 && segs[2] === "download") return getDownload(req, id);
   }
 
@@ -84,9 +86,17 @@ function enc(id: string): string {
   return encodeURIComponent(id);
 }
 
+/**
+ * The client's abort signal (Bun exposes one on the serve Request). Thread it
+ * into upstream calls so an abandoned client releases the upstream socket.
+ */
+function clientSignal(req: Request): AbortSignal | undefined {
+  return (req as { signal?: AbortSignal }).signal ?? undefined;
+}
+
 /** Non-ok upstream response → JSON passthrough with the upstream's status. */
-async function passthroughJson(res: Response, name: UpstreamName): Promise<Response> {
-  const text = await res.text();
+async function passthroughJson(res: Response, name: UpstreamName, signal?: AbortSignal | null): Promise<Response> {
+  const text = await readText(res, signal);
   let data: unknown = { error: `${name} returned ${res.status} with an empty body` };
   if (text.length > 0) {
     try {
@@ -116,10 +126,10 @@ function getIndex(): Response {
   });
 }
 
-async function healthProbe(name: UpstreamName): Promise<Record<string, unknown>> {
+async function healthProbe(name: UpstreamName, signal: AbortSignal | undefined): Promise<Record<string, unknown>> {
   try {
-    const res = await upstreamFetch(name, "/health", {}, HEALTH_TIMEOUT_MS);
-    const text = await res.text();
+    const res = await upstreamFetch(name, "/health", { signal }, HEALTH_TIMEOUT_MS);
+    const text = await readText(res, signal);
     const rec = safeParseRecord(text);
     if (res.ok) return rec ? { ...rec, ok: true } : { ok: true, body: text.slice(0, 200) };
     return rec
@@ -139,10 +149,10 @@ function safeParseRecord(text: string): Record<string, unknown> | null {
   }
 }
 
-async function getHealth(): Promise<Response> {
+async function getHealth(signal: AbortSignal | undefined): Promise<Response> {
   const [worker, paperbot] = await Promise.allSettled([
-    healthProbe("worker"),
-    healthProbe("paperbot"),
+    healthProbe("worker", signal),
+    healthProbe("paperbot", signal),
   ]);
   const pick = (r: PromiseSettledResult<Record<string, unknown>>): Record<string, unknown> =>
     r.status === "fulfilled" ? r.value : { ok: false, error: String(r.reason) };
@@ -152,11 +162,13 @@ async function getHealth(): Promise<Response> {
 async function postResearch(req: Request): Promise<Response> {
   return guard("worker", async () => {
     const ct = req.headers.get("content-type") ?? "application/json";
-    const body = await req.text();
+    // Stream the request body byte-faithfully (req.text() would corrupt
+    // non-UTF-8 payloads); forward content-type and the client abort signal.
     const { status, data } = await upstreamJson("worker", "/research", {
       method: "POST",
       headers: { "content-type": ct },
-      body,
+      body: req.body,
+      signal: clientSignal(req),
     });
     if (status === 202) {
       const rec = asRecord(data);
@@ -167,20 +179,23 @@ async function postResearch(req: Request): Promise<Response> {
   });
 }
 
-async function getResearchList(): Promise<Response> {
+async function getResearchList(signal: AbortSignal | undefined): Promise<Response> {
   return guard("worker", async () => {
-    const { status, data } = await upstreamJson("worker", "/research");
+    const { status, data } = await upstreamJson("worker", "/research", { signal });
     const rec = asRecord(data);
     if (rec && Array.isArray(rec.tasks)) {
-      rec.tasks = rec.tasks.map((t: any) => rewriteLinks("", { id: taskId(t) ?? "" }, t));
+      rec.tasks = rec.tasks.map((t: any) => {
+        const id = taskId(t);
+        return id ? rewriteLinks("", { id }, t) : t; // no id -> no links
+      });
     }
     return jsonResponse(rec ?? data, status);
   });
 }
 
-async function getResearch(id: string): Promise<Response> {
+async function getResearch(id: string, signal: AbortSignal | undefined): Promise<Response> {
   return guard("worker", async () => {
-    const { status, data } = await upstreamJson("worker", `/research/${enc(id)}`);
+    const { status, data } = await upstreamJson("worker", `/research/${enc(id)}`, { signal });
     const rec = asRecord(data);
     if (rec && status === 200) {
       return jsonResponse(rewriteLinks("", { id: taskId(rec) ?? id }, rec), status);
@@ -189,11 +204,11 @@ async function getResearch(id: string): Promise<Response> {
   });
 }
 
-async function getReport(id: string): Promise<Response> {
+async function getReport(id: string, signal: AbortSignal | undefined): Promise<Response> {
   return guard("worker", async () => {
     // Bytes passthrough preserves the upstream content-type on ok and its
     // error body (409/404) verbatim.
-    return toResponse(await upstreamBytes("worker", `/research/${enc(id)}/report`));
+    return toResponse(await upstreamBytes("worker", `/research/${enc(id)}/report`, { signal }), signal);
   });
 }
 
@@ -210,11 +225,16 @@ async function getDownload(req: Request, id: string): Promise<Response> {
   if (!PAGE_FORMATS.includes(pageFormat as (typeof PAGE_FORMATS)[number])) {
     return jsonResponse({ error: `page_format must be one of: ${PAGE_FORMATS.join(", ")}` }, 400);
   }
+  if (validate !== null && validate !== "true" && validate !== "false") {
+    return jsonResponse({ error: `validate must be "true" or "false"` }, 400);
+  }
 
+  const signal = clientSignal(req);
   try {
     // a) task must exist and be completed
-    const { status, data } = await upstreamJson("worker", `/research/${enc(id)}`);
+    const { status, data } = await upstreamJson("worker", `/research/${enc(id)}`, { signal });
     if (status === 404) return jsonResponse({ error: "not found" }, 404);
+    if (status < 200 || status >= 300) return jsonResponse(data, status); // transient upstream error: passthrough
     const st = asRecord(data)?.status;
     if (st === "running" || st === "queued") {
       return jsonResponse({ status: st, task_id: id }, 409);
@@ -231,10 +251,11 @@ async function getDownload(req: Request, id: string): Promise<Response> {
     }
 
     // b) fetch the report envelope, then hand it to paperbot /render
-    const reportRes = await upstreamFetch("worker", `/research/${enc(id)}/report`);
-    if (!reportRes.ok) return passthroughJson(reportRes, "worker");
-    const reportText = await reportRes.text();
-    return renderViaPaperbot(reportText, format, pageFormat, title, validate);
+    const reportRes = await upstreamFetch("worker", `/research/${enc(id)}/report`, { signal });
+    if (!reportRes.ok) return passthroughJson(reportRes, "worker", signal);
+    const reportText = await readText(reportRes, signal);
+    if (signal?.aborted) return new Response(null, { status: 204 }); // client gone; release done via cancel
+    return renderViaPaperbot(reportText, format, pageFormat, title, validate, signal);
   } catch (err) {
     return mapUpstreamError(err, "worker");
   }
@@ -247,6 +268,7 @@ function renderViaPaperbot(
   pageFormat: string,
   title: string | null,
   validate: string | null,
+  signal: AbortSignal | undefined,
 ): Promise<Response> {
   const qs = new URLSearchParams();
   qs.set("format", format);
@@ -258,8 +280,9 @@ function renderViaPaperbot(
       method: "POST",
       headers: { "content-type": "application/json" },
       body,
+      signal,
     });
-    return toResponse(result);
+    return toResponse(result, signal);
   });
 }
 
@@ -273,7 +296,8 @@ async function postRender(req: Request): Promise<Response> {
       method: "POST",
       headers,
       body: req.body,
+      signal: clientSignal(req),
     });
-    return toResponse(result);
+    return toResponse(result, clientSignal(req));
   });
 }
