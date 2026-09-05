@@ -4,7 +4,6 @@
 
 import {
   UpstreamName,
-  cors,
   jsonResponse,
   mapUpstreamError,
   rewriteLinks,
@@ -13,6 +12,7 @@ import {
   upstreamFetch,
   upstreamJson,
 } from "./upstream.ts";
+import { preflight } from "./cors.ts";
 
 const VERSION = "0.1.0";
 const HEALTH_TIMEOUT_MS = 5000;
@@ -25,7 +25,7 @@ export async function app(req: Request): Promise<Response> {
   if (path === "") path = "/";
   const method = req.method.toUpperCase();
 
-  if (method === "OPTIONS") return cors(new Response(null, { status: 204 }));
+  if (method === "OPTIONS") return preflight();
 
   try {
     return await route(method, path, req);

@@ -3,6 +3,7 @@
 // rewriting, CORS. Route files call into this; no routing logic lives here.
 
 import { config } from "./config.ts";
+import { withCors } from "./cors.ts";
 
 export type UpstreamName = "worker" | "paperbot";
 
@@ -129,7 +130,7 @@ export async function upstreamBytes(
 /** Serialize an upstreamBytes result: stream bytes (headers preserved) or JSON the error. */
 export function toResponse(result: UpstreamBytesResult): Response {
   if (result.kind === "bytes") {
-    return cors(new Response(result.body, { status: result.status, headers: result.headers }));
+    return withCors(new Response(result.body, { status: result.status, headers: result.headers }));
   }
   return jsonResponse(result.data, result.status);
 }
@@ -153,18 +154,9 @@ export function rewriteLinks(base: string, task: { id: string }, json: any): any
   };
 }
 
-/** Clone a response, adding permissive CORS headers. */
-export function cors(res: Response): Response {
-  const headers = new Headers(res.headers);
-  headers.set("access-control-allow-origin", "*");
-  headers.set("access-control-allow-methods", "GET, POST, OPTIONS");
-  headers.set("access-control-allow-headers", "content-type");
-  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
-}
-
 /** JSON response with CORS applied. */
 export function jsonResponse(data: unknown, status = 200, headers?: Record<string, string>): Response {
-  return cors(new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...headers } }));
+  return withCors(new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", ...headers } }));
 }
 
 /** Map any error raised during an upstream call to a client Response. */
