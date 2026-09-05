@@ -33,6 +33,12 @@ Invalid values fail fast at startup with a descriptive error.
 | `PAPERBOT_URL`       | `http://localhost:8322` | Base URL of deep-reach-backend (paperbot)                                                 |
 | `UPSTREAM_TIMEOUT_MS`| `300000`                | Timeout per upstream call, in ms (5 min). Does not apply to the `/health` probes (fixed 5 s) |
 
+Validation: `PORT` must be an integer 1–65535; `HOST` must be an IP address
+or `"localhost"` (blank/empty falls back to the default, anything else is a
+startup error); `WORKER_URL`/`PAPERBOT_URL` must be base URLs **without a path
+or query** (blank/empty falls back to the default). Invalid values exit before
+the server binds, with a message naming the variable.
+
 ## Endpoints
 
 | Method | Path                     | Purpose                                                          |
@@ -102,8 +108,10 @@ before posting a new topic.
 
 ## POST /research
 
-Proxies the request body (and `content-type`, default `application/json`)
-verbatim to the worker's `POST /research`. Body fields (worker's contract):
+Proxies the request body **byte-for-byte** (including non-UTF-8 payloads —
+it is streamed, not re-encoded) and the `content-type` header (default
+`application/json`) to the worker's `POST /research`. Body fields (the
+worker's contract):
 
 | Field        | Type | Default | Meaning                                              |
 | ------------ | ---- | ------- | ---------------------------------------------------- |
@@ -233,10 +241,12 @@ Behavior, in order:
 1. **Enum validation** (checked first, even for unknown ids):
    - `400 {"error": "format must be one of: pdf, html"}`
    - `400 {"error": "page_format must be one of: letter, a4, legal, a5, tabloid"}`
+   - `400 {"error": "validate must be \"true\" or \"false\""}` (for any other value)
 2. **Task-state gating** (from the worker's task record):
    | Status | Response                                                              |
    | ------ | ---------------------------------------------------------------------- |
    | 404    | Unknown task: `{"error": "not found"}`                                |
+   | worker's 5xx/4xx | The task-record probe is not 2xx/404 (e.g. a transient worker error): the worker's status and body pass through unchanged |
    | 409    | `running`/`queued` task: `{"status": "running" \| "queued", "task_id": "<id>"}`; any other non-completed status: `{"error": "task is not downloadable (status: <s>)", "task_id": "<id>"}` |
    | 502    | `failed` task: `{"error": "<worker's error, else 'research task failed'>", "task_id": "<id>"}` |
 3. **Render** (completed tasks): the worker report is posted to paperbot's
@@ -265,6 +275,7 @@ for rendering arbitrary documents that did not come out of `/research`.
 
 - `OPTIONS` (any path) → **204**, no body, CORS headers; upstreams are never
   contacted for preflights.
+- `HEAD` is handled as `GET` (status + headers only; the body is not sent).
 - Any other method/path → **404** `{"error": "not found"}`.
 
 ## Error semantics
@@ -277,7 +288,7 @@ Transport-level failures are synthesized by this service:
 | -------------------------------------------------------------- | ------ | ------------------------------------------------------------------------- |
 | Upstream unreachable (DNS failure, connection refused, …)       | 502    | `{"error": "<name> unreachable", "detail": "<cause>"}`                    |
 | Upstream slower than `UPSTREAM_TIMEOUT_MS`                      | 504    | `{"error": "<name> timed out", "detail": "no response from <url> within <N>ms"}` |
-| An ok response whose body is not JSON, on a JSON-expected route | 502    | `{"error": "<name> unreachable", "detail": "<first 500 chars of body>"}`  |
+| An ok response whose body is not JSON, on a JSON-expected route | 502    | `{"error": "<name> returned invalid JSON", "detail": "<first 500 chars of body>"}`  |
 | Any other internal error                                        | 500    | `{"error": "internal error", "detail": "<message>"}`                      |
 
 `<name>` is `worker` or `paperbot`. The `/health` probes are the exception:
@@ -317,7 +328,8 @@ until it finishes on its own).
   of the box; restrict origins at a proxy if exposed to untrusted networks.
 - Stateless single process: the only state that exists is the worker's
   in-memory task store — a worker restart loses its tasks.
-- Implementation is three files: `src/app.ts` (router), `src/cors.ts`
-  (paperbot-compatible CORS), and `src/upstream.ts` (transport: timeout, error
-  mapping, body passthrough, link rewriting). Run with
+- Implementation is five small files: `src/config.ts` (env load +
+  validation), `src/app.ts` (router), `src/cors.ts` (paperbot-compatible
+  CORS), `src/upstream.ts` (transport: timeout, error mapping, body
+  passthrough, link rewriting), and `src/index.ts` (entry). Run with
   [Bun](https://bun.sh); `bun run typecheck` for types.
