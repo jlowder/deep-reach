@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "typescript": "^5.5.0"
+    "@types/bun": "^1.4.1",
+    "typescript": "^5.0.0"
   }
 }

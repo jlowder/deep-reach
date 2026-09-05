@@ -5,7 +5,7 @@
     "module": "preserve",
     "moduleResolution": "bundler",
     "lib": ["ES2022"],
-    "types": [],
+    "types": ["bun"],
     "noEmit": true,
     "isolatedModules": true,
     "skipLibCheck": true,
