@@ -22,6 +22,8 @@ html[data-theme="ink"] {
   --glow: rgba(255, 180, 84, 0.28);
   --err-soft: rgba(242, 112, 138, 0.12);
   --err-hairline: rgba(242, 112, 138, 0.4);
+  --row-selected: var(--raised);
+  --row-selected-top: transparent;
 }
 
 html[data-theme="paper"] {
@@ -39,6 +41,9 @@ html[data-theme="paper"] {
   --glow: rgba(160, 94, 10, 0.18);
   --err-soft: rgba(194, 64, 94, 0.1);
   --err-hairline: rgba(194, 64, 94, 0.35);
+  /* One step deeper than the cream field so the selection reads on light. */
+  --row-selected: #f1ede2;
+  --row-selected-top: var(--accent);
 }
 
 /* Expose the tokens (and the next/font variables from layout.tsx) as Tailwind
@@ -58,6 +63,8 @@ html[data-theme="paper"] {
   --color-glow: var(--glow);
   --color-err-soft: var(--err-soft);
   --color-err-hairline: var(--err-hairline);
+  --color-row-selected: var(--row-selected);
+  --color-row-selected-top: var(--row-selected-top);
 
   --font-display: var(--font-chakra-petch);
   --font-body: var(--font-ibm-plex-sans);

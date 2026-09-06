@@ -114,7 +114,7 @@ export function TaskList({
               "grid-cols-[12px_minmax(0,1fr)_auto_auto]",
               "min-[480px]:grid-cols-[12px_minmax(0,1fr)_auto_auto_auto_auto]",
               selected
-                ? "bg-raised shadow-[inset_2px_0_0_var(--accent)]"
+                ? "bg-row-selected shadow-[inset_2px_0_0_var(--accent),inset_0_1px_0_var(--row-selected-top)]"
                 : "hover:bg-surface",
             )}
           >

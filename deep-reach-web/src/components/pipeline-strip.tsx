@@ -44,7 +44,10 @@ export function PipelineStrip({
             />
             <span
               className={cx(
-                "font-mono text-[10px] uppercase tracking-[0.12em]",
+                // 9 px below 480 px so the five labels clear a 390 px
+                // column; wrapping is allowed (two lines max) rather than
+                // overlapping the neighbor node
+                "font-mono text-[9px] uppercase leading-[1.15] tracking-[0.12em] text-center max-w-[4.2rem] min-[480px]:max-w-none min-[480px]:text-[10px] min-[480px]:leading-[1.4]",
                 dim
                   ? "text-dim/70"
                   : stage.state === "todo"
