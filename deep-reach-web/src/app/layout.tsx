@@ -28,18 +28,25 @@ export const metadata: Metadata = {
     "Multi-agent deep research: queued runs, live progress, and retrieval-augmented reports.",
 };
 
-// Theme logic (next-themes or a manual toggle) lands in a follow-up dispatch;
-// until then the app always renders dark.
-const THEME = "dark" as const;
+// Runs before first paint: apply the stored theme (default "ink") so the page
+// never flashes the wrong palette. Mirrors src/lib/theme.tsx — keep the two
+// reads in sync.
+const themeScript =
+  '(function(){var t="ink";try{var s=localStorage.getItem("deep-reach-theme");' +
+  't=s==="paper"?"paper":"ink";}catch(e){}' +
+  'document.documentElement.dataset.theme=t;})();';
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${chakraPetch.variable} ${ibmPlexSans.variable} ${ibmPlexMono.variable} h-full antialiased ${THEME}`}
+      className={`${chakraPetch.variable} ${ibmPlexSans.variable} ${ibmPlexMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+      </head>
+      <body className="min-h-full">{children}</body>
     </html>
   );
 }
