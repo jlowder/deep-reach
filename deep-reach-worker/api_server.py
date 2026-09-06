@@ -82,6 +82,29 @@ class TaskRecord:
     budget_web: int = 5
 
 
+def promote_next_pending(
+    tasks: dict[str, TaskRecord], lock: threading.Lock
+) -> Optional[TaskRecord]:
+    """Queue pump: atomically promote the oldest pending task to running.
+
+    FIFO by creation order (the tasks dict is insertion-ordered). Returns
+    the promoted record — the caller spawns its worker/watchdog threads —
+    or None if any task is still running or nothing is pending. The
+    running-check and the promotion happen together under `lock`, so
+    however many pumps race, a given task can be promoted at most once.
+    """
+    with lock:
+        if any(t.status == "running" for t in tasks.values()):
+            return None
+        record = next((t for t in tasks.values() if t.status == "pending"), None)
+        if record is None:
+            return None
+        record.status = "running"
+        record.current_step = "queued"
+        record.started_at = time.time()
+        return record
+
+
 class ResearchRequest(BaseModel):
     """POST /research body. `topic` is required and must be non-empty."""
 
@@ -169,7 +192,9 @@ def create_app(
     def _worker(
         record: TaskRecord, fn: Callable[..., dict], topic: str, budgets: dict
     ) -> None:
-        """Daemon-thread body: run fn, store artifacts, finalize the record."""
+        """Daemon-thread body: run fn, store artifacts, finalize the record,
+        then pump the queue (the run_fn thread has returned, so the
+        pipeline's process lock is free again)."""
         error: Optional[str] = None
         result: Any = None
         try:
@@ -198,6 +223,11 @@ def create_app(
             _finalize(record, "completed")
         else:
             _finalize(record, "failed", error=error)
+        # The run has truly stopped — whether we won the race against the
+        # watchdog or we are a zombie it already marked failed — so the
+        # pipeline lock is released and the queue may advance: start the
+        # oldest pending task (no-op when none is waiting).
+        _pump()
 
     def _watchdog(record: TaskRecord) -> None:
         time.sleep(max_run_seconds)
@@ -232,6 +262,17 @@ def create_app(
             target=_worker, args=(record, run, topic, budgets), daemon=True
         ).start()
         threading.Thread(target=_watchdog, args=(record,), daemon=True).start()
+
+    def _pump() -> None:
+        """Start the oldest pending task now that a run has stopped.
+
+        Idempotent: promote_next_pending re-checks for a running task and
+        promotes under the lock, so racing pumps never double-start. The
+        threads are spawned after the lock is released.
+        """
+        record = promote_next_pending(tasks, lock)
+        if record is not None:
+            _start_task(record, fn, record.topic, _budgets(record))
 
     def _summary(t: TaskRecord) -> dict:
         return {

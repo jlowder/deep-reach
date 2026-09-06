@@ -649,13 +649,17 @@ def deep_research(
         return {"final_answer": final_answer, "state": state, "stats": stats}
 
     # Serialize deep runs (the tracked run_model swap is process-global).
+    # `originals` is pre-bound and the try covers the reset/install pair,
+    # so the finally below releases the lock on every exit path; a wedged
+    # lock would wedge every later run (and the API's queue pump) forever.
     _deep_run_lock.acquire()
-    # AFTER the lock: a queued run must not re-arm the writer's shared
-    # truncation-retry budget while run 1 is still writing (reset would be
-    # an out-of-band write into a run that is in progress).
-    reset_writer_retry_budget()  # fresh truncation-retry budget for this run
-    originals = _install_tracked_run_models(budget, verbose)
+    originals = None
     try:
+        # AFTER the lock: a queued run must not re-arm the writer's shared
+        # truncation-retry budget while run 1 is still writing (reset would
+        # be an out-of-band write into a run that is in progress).
+        reset_writer_retry_budget()  # fresh truncation-retry budget for this run
+        originals = _install_tracked_run_models(budget, verbose)
         # ------------------------------------------------------------------
         # Doc catalog (empty → web-only mode, P1-6)
         # ------------------------------------------------------------------
@@ -1400,5 +1404,6 @@ def deep_research(
 
         return _finish(final_answer)
     finally:
-        _restore_tracked_run_models(originals)
+        if originals is not None:
+            _restore_tracked_run_models(originals)
         _deep_run_lock.release()
