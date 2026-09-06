@@ -20,7 +20,7 @@ SVC_NAMES=(worker backend api web)
 SVC_DIRS=(deep-reach-worker deep-reach-backend deep-reach-api deep-reach-web)
 SVC_RUNTIMES=(python node bun node)
 SVC_CMDS=("venv/bin/python api_server.py" "npm run serve" "bun run src/index.ts" "npm run dev")
-SVC_PORTS=(8321 8322 8320 3000)
+SVC_PORTS=(8321 8322 8320 8323)
 SVC_HEALTH=(/health /openapi.json /health /)
 
 NUM_SVCS=${#SVC_NAMES[@]}
@@ -40,6 +40,26 @@ pid_alive() {
   local p="${1:-}"
   [ -n "$p" ] || return 1
   kill -0 "$p" 2>/dev/null
+}
+
+# descendants_of <pid> — print all descendant pids of <pid> (recursive).
+descendants_of() {
+  local p="$1" c
+  for c in $(ps -ax -o pid=,ppid= | awk -v p="$p" '$2 == p { print $1 }'); do
+    printf '%s ' "$c"
+    descendants_of "$c"
+  done
+}
+
+# kill_subtree <pid> [signal] — send a signal to <pid> and every descendant.
+# (The launched pid can be a wrapper subshell whose child is the real server,
+# so killing only the recorded pid would orphan the service.)
+kill_subtree() {
+  local p="$1" sig="${2:-TERM}" c
+  for c in $(descendants_of "$p"); do
+    kill -"$sig" "$c" 2>/dev/null
+  done
+  kill -"$sig" "$p" 2>/dev/null
 }
 
 # svc_idx <name> — print the table index of a service name; fail if unknown.
@@ -187,7 +207,7 @@ check_llm() {
 # stop
 # ---------------------------------------------------------------------------
 cmd_stop() {
-  local i name pidfile pid n port still=0
+  local i name pidfile pid n port still=0 stopped_pids=""
   # reverse dependency order: web, api, backend, worker
   for ((i = NUM_SVCS - 1; i >= 0; i--)); do
     name="${SVC_NAMES[$i]}"
@@ -195,14 +215,15 @@ cmd_stop() {
     if [ -f "$pidfile" ]; then
       pid="$(cat "$pidfile" 2>/dev/null || true)"
       if pid_alive "$pid"; then
-        kill "$pid" 2>/dev/null
+        kill_subtree "$pid" TERM
         n=0
         while pid_alive "$pid" && [ "$n" -lt 20 ]; do sleep 0.5; n=$((n + 1)); done
         if pid_alive "$pid"; then
-          kill -9 "$pid" 2>/dev/null
+          kill_subtree "$pid" KILL
           sleep 1
         fi
         echo "$name: stopped (pid $pid)"
+        stopped_pids="$stopped_pids $pid"
       else
         echo "$name: pid $pid not alive — no kill needed"
       fi
@@ -212,7 +233,8 @@ cmd_stop() {
     fi
   done
 
-  # sweep any leftover listeners on the service ports (e.g. child of a re-exec'd launcher)
+  # sweep any leftover listeners on the service ports (backstop for
+  # processes that outlived the pid-kill round, e.g. re-exec'd children)
   for ((i = 0; i < NUM_SVCS; i++)); do
     port="${SVC_PORTS[$i]}"
     if port_open "$port"; then
@@ -222,6 +244,17 @@ cmd_stop() {
       sleep 1
     fi
   done
+
+  # final orphan sweep: reap any descendant of a recorded pid that survived
+  for pid in $stopped_pids; do
+    if pid_alive "$pid"; then
+      for n in $(descendants_of "$pid"); do
+        kill -9 "$n" 2>/dev/null
+      done
+      kill -9 "$pid" 2>/dev/null
+    fi
+  done
+  sleep 1
 
   # verify everything is down
   echo
@@ -239,7 +272,7 @@ cmd_stop() {
     warn "one or more ports are still listening after stop"
     return 1
   fi
-  echo "all ports (3000 8320 8321 8322) are free"
+  echo "all ports (8323 8320 8321 8322) are free"
   return 0
 }
 
@@ -344,7 +377,7 @@ Services (dependency order worker -> backend -> api -> web):
   worker    python    venv/bin/python api_server.py  8321  /health
   backend   node      npm run serve                8322  TCP only (optionally /openapi.json)
   api       bun       bun run src/index.ts         8320  /health
-  web       node      npm run dev                  3000  /
+  web       node      npm run dev                  8323  /
 
 Dependency wiring: web -> api -> { worker, backend }. The Next.js web app rewrites
 /api/* to the glue api service, which proxies to worker and backend.

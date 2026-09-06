@@ -9,7 +9,7 @@ A multi-agent RAG deep-research system: an orchestrator coordinates Retriever/Wr
 | worker    | `deep-reach-worker` | python  | `venv/bin/python api_server.py` | 8321 | `/health`        |
 | backend   | `deep-reach-backend`| node    | `npm run serve`             | 8322 | TCP (optionally `/openapi.json`) |
 | api       | `deep-reach-api`    | bun     | `bun run src/index.ts`      | 8320 | `/health`         |
-| web       | `deep-reach-web`    | node    | `npm run dev`               | 3000 | `/`               |
+| web       | `deep-reach-web`    | node    | `npm run dev`               | 8323 | `/`               |
 
 Dependency wiring: **web → api → { worker, backend }** — the web app rewrites `/api/*` to the glue api service, which proxies to the worker and backend.
 

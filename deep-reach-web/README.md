@@ -9,7 +9,7 @@ them to the glue, so client code never knows the glue's address and there is no
 CORS to configure.
 
 ```
-deep-reach-web :3000  →  deep-reach-api (glue) :8320  →  deep-reach-worker :8321 (pipeline)  +  deep-reach-backend "paperbot" :8322 (render)
+deep-reach-web :8323  →  deep-reach-api (glue) :8320  →  deep-reach-worker :8321 (pipeline)  +  deep-reach-backend "paperbot" :8322 (render)
 ```
 
 ## Run locally
@@ -21,7 +21,7 @@ Start in dependency order — the two upstreams first, then the glue, then the c
 | deep-reach-worker | `cd deep-reach-worker && venv/bin/python api_server.py` | 8321 | `PORT` / `HOST` (8321 / 0.0.0.0). LLM config in `utils/var.env`: `LLM_ENDPOINT` (any OpenAI-compatible base URL), `LLM_API_KEY`, `LLM_MODEL`; the file is auto-created from `.env.example` if missing. One-time venv: `python3 -m venv venv && venv/bin/pip install -r utils/requirements.txt` |
 | deep-reach-backend ("paperbot") | `cd deep-reach-backend && npm run serve` (or `npm run serve:prod`) | 8322 | `PORT` / `HOST` (8322 / 0.0.0.0). One-time `npm run setup` (installs deps + Playwright Chromium). Requires Node ≥ 20 |
 | deep-reach-api (glue) | `cd deep-reach-api && bun run src/index.ts` (`bun run dev` for `--watch`) | 8320 | `.env` (Bun auto-loads): `WORKER_URL` (http://localhost:8321), `PAPERBOT_URL` (http://localhost:8322), `UPSTREAM_TIMEOUT_MS` (300000). Invalid values fail fast at boot |
-| deep-reach-web | `cd deep-reach-web && npm install`, then `npm run dev` (or `npx next dev`) | 3000 | `.env.local` (template in `.env.example`): `DEEP_REACH_API_URL=http://localhost:8320`. `next.config.ts` bakes the rewrite target in at server start — restart the dev server after changing it |
+| deep-reach-web | `cd deep-reach-web && npm install`, then `npm run dev` (or `npx next dev -p 8323`) | 8323 | `.env.local` (template in `.env.example`): `DEEP_REACH_API_URL=http://localhost:8320`. `next.config.ts` bakes the rewrite target in at server start — restart the dev server after changing it |
 
 ## How it works
 
