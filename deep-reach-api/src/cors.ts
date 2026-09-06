@@ -12,7 +12,9 @@
 // cross-origin browser clients.
 
 export const ALLOW_ORIGIN = "*";
-export const ALLOW_METHODS = "GET, POST, OPTIONS";
+// DELETE for the /research/{id} removal proxy; browsers preflight it, so it
+// must be advertised here or the preflight fails before the route runs.
+export const ALLOW_METHODS = "GET, POST, DELETE, OPTIONS";
 export const ALLOW_HEADERS = "content-type";
 export const EXPOSE_HEADERS = "content-type, content-disposition, x-paperbot-warnings";
 

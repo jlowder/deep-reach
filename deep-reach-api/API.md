@@ -46,15 +46,19 @@ the server binds, with a message naming the variable.
 | POST   | `/research`              | Start a research run (proxied to worker) → 202 with task id       |
 | GET    | `/research`              | List all tasks (worker), each augmented with `links`              |
 | GET    | `/research/{id}`         | Full task record (worker) + `links`                               |
+| DELETE | `/research/{id}`         | Remove a finished task (worker) — status + body passthrough        |
 | GET    | `/research/{id}/report`  | Structured report JSON (worker)                                   |
 | GET    | `/research/{id}/download`| Completed run → rendered PDF/HTML bytes (worker report → paperbot) |
 | POST   | `/render`                | Raw passthrough to paperbot's `/render`                           |
+| GET    | `/documents`             | Worker staging state: {staged, on_disk, indexed} (passthrough)     |
+| POST   | `/documents`             | Stage PDFs (multipart `files`) for the next research task (raw passthrough) |
+| DELETE | `/documents`             | Unstage all staged documents (passthrough)                         |
 | GET    | `/health`                | Probe both upstreams in parallel; always 200                     |
 | GET    | `/`                      | Service index                                                     |
 
 All responses carry the same CORS headers as deep-reach-backend (paperbot):
 `Access-Control-Allow-Origin: *` (fixed — no origin reflection, no `Vary`),
-`Access-Control-Allow-Methods: GET, POST, OPTIONS`,
+`Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS`,
 `Access-Control-Allow-Headers: content-type`. Non-preflight responses add one
 thing paperbot does not: `Access-Control-Expose-Headers: content-type,
 content-disposition, x-paperbot-warnings`, so browsers can read the metadata
@@ -75,7 +79,11 @@ upstream contact. Trailing slashes are normalized (`/research/` routes to
     "GET /research/{id}",
     "GET /research/{id}/report",
     "GET /research/{id}/download",
+    "DELETE /research/{id}",
     "POST /render",
+    "GET /documents",
+    "POST /documents",
+    "DELETE /documents",
     "GET /health"
   ]
 }
@@ -247,7 +255,7 @@ Behavior, in order:
    | ------ | ---------------------------------------------------------------------- |
    | 404    | Unknown task: `{"error": "not found"}`                                |
    | worker's 5xx/4xx | The task-record probe is not 2xx/404 (e.g. a transient worker error): the worker's status and body pass through unchanged |
-   | 409    | `running`/`queued` task: `{"status": "running" \| "queued", "task_id": "<id>"}`; any other non-completed status: `{"error": "task is not downloadable (status: <s>)", "task_id": "<id>"}` |
+   | 409    | `running`/`queued`/`pending` task: `{"status": "running" \| "queued" \| "pending", "task_id": "<id>"}`; any other non-completed status: `{"error": "task is not downloadable (status: <s>)", "task_id": "<id>"}` |
    | 502    | `failed` task: `{"error": "<worker's error, else 'research task failed'>", "task_id": "<id>"}` |
 3. **Render** (completed tasks): the worker report is posted to paperbot's
    `POST /render` with the same options and the result is streamed back
@@ -258,6 +266,21 @@ Behavior, in order:
    - `format=html` → `Content-Type: text/html; charset=utf-8`,
      `X-Paperbot-warnings: <n>`
    - paperbot errors (400/413/500/503) pass through as its JSON `{"error": …}`
+
+## DELETE /research/{id}
+
+Proxies `DELETE` to the worker's task route; the worker's status and JSON
+body pass through (no body or query on the way in):
+
+| Status | When                                                        |
+| ------ | ----------------------------------------------------------- |
+| 200    | The task was removed (it is gone from the worker's store)   |
+| 409    | The task is `running` and cannot be removed yet             |
+| 404    | Unknown id — the worker's body passes through               |
+| 400    | Malformed percent-encoding in the id: `{"error": "invalid task id"}` (this service) |
+
+The worker decides the outcome (removed / in progress / unknown); this
+service adds no gating of its own beyond the id decoding above.
 
 ## POST /render
 
@@ -270,6 +293,35 @@ its query options (`format`, `page_format`, `title`, `validate`); see
 [paperbot's docs](../deep-reach-backend/API.md) for the full contract, body
 limit (10 MB), and error/warning tables. This endpoint is the escape hatch
 for rendering arbitrary documents that did not come out of `/research`.
+
+## /documents (RAG staging, proxied to the worker)
+
+PDFs a research run should retrieve against are staged on the worker via
+these routes; all three pass the worker's status and body through.
+
+### POST /documents
+
+Raw byte passthrough (like `POST /render`): the multipart body (form field
+`files`, repeatable), the `content-type` header, and the query string are
+forwarded verbatim, and the worker's response is returned byte-for-byte.
+The worker's contract: uploads are magic-checked, name-sanitized and
+deduped, then **staged for the next created research task** —
+`201 {"documents": […], "rejected": {…}}`, or `400` when every upload is
+rejected. Staged documents attach to that task, are indexed into the vector
+store when the task starts, and are removed from disk when it exits
+(worker contract — see [its API](../deep-reach-worker/API.md)).
+
+### GET /documents
+
+JSON passthrough of the worker's staging state:
+`{"staged": […], "on_disk": […], "indexed": […]}` — best-effort on the
+worker (empty lists on error, never a 5xx).
+
+### DELETE /documents
+
+JSON passthrough: the worker unstages every staged file (off disk, out of
+the registry) and purges the removed files' chunks from the vector store →
+`200 {"removed": […]}`.
 
 ## Everything else
 

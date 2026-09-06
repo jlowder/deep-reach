@@ -1,0 +1,194 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Deep Reach console — "ink & paper, amber-lit observatory".
+   dark = INK (default), light = PAPER. Tokens live on <html data-theme>;
+   the pre-paint script in src/app/layout.tsx sets it before first paint.
+--------------------------------------------------------------------------- */
+
+:root,
+html[data-theme="ink"] {
+  --field: #0a0f1e;
+  --surface: #101629;
+  --raised: #182038;
+  --hairline: rgba(141, 155, 205, 0.14);
+  --text: #e6eaf6;
+  --dim: #8a94b8;
+  --accent: #ffb454;
+  --accent-soft: rgba(255, 180, 84, 0.14);
+  --wait: #6c8cff;
+  --ok: #58c48a;
+  --err: #f2708a;
+  --glow: rgba(255, 180, 84, 0.28);
+  --err-soft: rgba(242, 112, 138, 0.12);
+  --err-hairline: rgba(242, 112, 138, 0.4);
+  --row-selected: var(--raised);
+  --row-selected-top: transparent;
+}
+
+html[data-theme="paper"] {
+  --field: #f6f4ee;
+  --surface: #fcfbf8;
+  --raised: #ffffff;
+  --hairline: #e2dfd5;
+  --text: #1b2340;
+  --dim: #5a6280;
+  --accent: #a05e0a;
+  --accent-soft: rgba(160, 94, 10, 0.12);
+  --wait: #3b5bdb;
+  --ok: #1f7a4d;
+  --err: #c2405e;
+  --glow: rgba(160, 94, 10, 0.18);
+  --err-soft: rgba(194, 64, 94, 0.1);
+  --err-hairline: rgba(194, 64, 94, 0.35);
+  /* One step deeper than the cream field so the selection reads on light. */
+  --row-selected: #f1ede2;
+  --row-selected-top: var(--accent);
+}
+
+/* Expose the tokens (and the next/font variables from layout.tsx) as Tailwind
+   utilities: bg-field, text-dim, border-hairline, font-display, ... */
+@theme inline {
+  --color-field: var(--field);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-hairline: var(--hairline);
+  --color-text: var(--text);
+  --color-dim: var(--dim);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-wait: var(--wait);
+  --color-ok: var(--ok);
+  --color-err: var(--err);
+  --color-glow: var(--glow);
+  --color-err-soft: var(--err-soft);
+  --color-err-hairline: var(--err-hairline);
+  --color-row-selected: var(--row-selected);
+  --color-row-selected-top: var(--row-selected-top);
+
+  --font-display: var(--font-chakra-petch);
+  --font-body: var(--font-ibm-plex-sans);
+  --font-mono: var(--font-ibm-plex-mono);
+}
+
+@layer base {
+  body {
+    background-color: var(--field);
+    color: var(--text);
+    font-family: var(--font-body), system-ui, sans-serif;
+    font-size: 14.5px;
+    line-height: 1.55;
+    /* Faint 32px engineering grid + a soft vignette lifting the top center. */
+    background-image:
+      radial-gradient(
+        120% 90% at 50% -10%,
+        color-mix(in srgb, var(--surface) 60%, transparent),
+        transparent 65%
+      ),
+      repeating-linear-gradient(
+        to right,
+        color-mix(in srgb, var(--hairline) 45%, transparent) 0 1px,
+        transparent 1px 32px
+      ),
+      repeating-linear-gradient(
+        to bottom,
+        color-mix(in srgb, var(--hairline) 45%, transparent) 0 1px,
+        transparent 1px 32px
+      );
+    background-attachment: fixed;
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--hairline) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--hairline);
+  }
+
+  /* Theme switch: colors only, 200 ms. Zero-specificity :where() so any
+     component-level transition still wins. */
+  :where(
+      body,
+      a,
+      button,
+      input,
+      textarea,
+      select,
+      label,
+      span,
+      div,
+      pre,
+      section,
+      aside,
+      main,
+      header,
+      h1,
+      h2,
+      h3,
+      p
+    ) {
+    transition:
+      background-color 200ms ease,
+      color 200ms ease,
+      border-color 200ms ease,
+      box-shadow 200ms ease;
+  }
+}
+
+/* Signature: the amber glow that breathes around a live stage / running lamp. */
+@keyframes dr-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--glow);
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+@keyframes dr-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@utility animate-pulse-glow {
+  animation: dr-pulse 2s ease-in-out infinite;
+}
+
+@utility animate-fade-up {
+  animation: dr-fade-up 160ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}

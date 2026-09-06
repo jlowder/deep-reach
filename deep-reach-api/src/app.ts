@@ -13,7 +13,7 @@ import {
   upstreamFetch,
   upstreamJson,
 } from "./upstream.ts";
-import { preflight } from "./cors.ts";
+import { preflight, withCors } from "./cors.ts";
 
 const VERSION = "0.1.0";
 const HEALTH_TIMEOUT_MS = 5000;
@@ -45,18 +45,26 @@ async function route(method: string, path: string, req: Request): Promise<Respon
   if (method === "POST" && path === "/research") return postResearch(req);
   if (method === "GET" && path === "/research") return getResearchList(clientSignal(req));
   if (method === "POST" && path === "/render") return postRender(req);
+  if (path === "/documents") {
+    if (method === "GET") return getDocuments(clientSignal(req));
+    if (method === "POST") return postDocuments(req);
+    if (method === "DELETE") return deleteDocuments(clientSignal(req));
+  }
 
   const segs = path.split("/").filter((s) => s.length > 0);
-  if (method === "GET" && segs[0] === "research" && segs.length >= 2) {
+  if ((method === "GET" || method === "DELETE") && segs[0] === "research" && segs.length >= 2) {
     let id: string;
     try {
       id = decodeURIComponent(segs[1]);
     } catch {
       return jsonResponse({ error: "invalid task id" }, 400);
     }
-    if (segs.length === 2) return getResearch(id, clientSignal(req));
-    if (segs.length === 3 && segs[2] === "report") return getReport(id, clientSignal(req));
-    if (segs.length === 3 && segs[2] === "download") return getDownload(req, id);
+    if (method === "GET") {
+      if (segs.length === 2) return getResearch(id, clientSignal(req));
+      if (segs.length === 3 && segs[2] === "report") return getReport(id, clientSignal(req));
+      if (segs.length === 3 && segs[2] === "download") return getDownload(req, id);
+    }
+    if (method === "DELETE" && segs.length === 2) return deleteResearch(id, clientSignal(req));
   }
 
   return jsonResponse({ error: "not found" }, 404);
@@ -108,6 +116,74 @@ async function passthroughJson(res: Response, name: UpstreamName, signal?: Abort
   return jsonResponse(data, res.status);
 }
 
+/** Browser full-page navigation? (Accept: text/html — always true for nav). */
+function wantsHtml(req: Request): boolean {
+  return (req.headers.get("accept") ?? "").includes("text/html");
+}
+
+/**
+ * Minimal styled error page for a failed download navigation: a raw JSON
+ * error body is unreadable as a standalone document, so a browser-initiated
+ * failure gets a quiet page (ink palette, mono) with the upstream message
+ * and a way back to the console. API clients (no text/html in Accept) keep
+ * the JSON passthrough. Used on the download route only.
+ */
+function htmlErrorPage(status: number, message: string): Response {
+  const safe = message.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+  const page = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deep Reach — download failed</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         background: #0a0f1e; color: #e6eaf6;
+         font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  main { max-width: 560px; border: 1px solid rgba(242, 112, 138, .4); background: #101629; padding: 40px 48px; }
+  .code { color: #f2708a; font-size: 11px; letter-spacing: .18em; text-transform: uppercase; }
+  h1 { font-size: 15px; letter-spacing: .08em; margin: 12px 0; }
+  p { color: #8a94b8; margin: 0 0 24px; }
+  a { display: inline-block; color: #ffb454; border: 1px solid rgba(255, 180, 84, .5); padding: 8px 16px; text-decoration: none; }
+  a:hover { background: rgba(255, 180, 84, .12); }
+</style>
+</head>
+<body>
+<main>
+  <div class="code">download failed &middot; ${status}</div>
+  <h1>The report could not be rendered.</h1>
+  <p>${safe}</p>
+  <a href="/">Back to the console</a>
+</main>
+</body>
+</html>`;
+  return withCors(new Response(page, { status, headers: { "content-type": "text/html; charset=utf-8" } }));
+}
+
+/** Non-ok response + browser navigation → the styled HTML page; else unchanged. */
+async function forBrowser(req: Request, res: Response): Promise<Response> {
+  if (res.status < 400 || !wantsHtml(req)) return res;
+  let message = `the upstream service returned ${res.status}`;
+  try {
+    const text = await res.text();
+    if (text.length > 0) {
+      try {
+        const parsed = asRecord(JSON.parse(text));
+        if (parsed && typeof parsed.error === "string") {
+          message = typeof parsed.detail === "string" ? `${parsed.error} — ${parsed.detail}` : parsed.error;
+        } else {
+          message = text.slice(0, 200);
+        }
+      } catch {
+        message = text.slice(0, 200);
+      }
+    }
+  } catch {
+    /* unreadable body — keep the default message */
+  }
+  return htmlErrorPage(res.status, message);
+}
+
 // --- routes ----------------------------------------------------------------
 
 function getIndex(): Response {
@@ -120,7 +196,11 @@ function getIndex(): Response {
       "GET /research/{id}",
       "GET /research/{id}/report",
       "GET /research/{id}/download",
+      "DELETE /research/{id}",
       "POST /render",
+      "GET /documents",
+      "POST /documents",
+      "DELETE /documents",
       "GET /health",
     ],
   });
@@ -204,6 +284,18 @@ async function getResearch(id: string, signal: AbortSignal | undefined): Promise
   });
 }
 
+async function deleteResearch(id: string, signal: AbortSignal | undefined): Promise<Response> {
+  return guard("worker", async () => {
+    // Status + JSON body passthrough (200 removed / 409 running / 404 unknown
+    // on the worker; every non-2xx body passes through verbatim).
+    const { status, data } = await upstreamJson("worker", `/research/${enc(id)}`, {
+      method: "DELETE",
+      signal,
+    });
+    return jsonResponse(data, status);
+  });
+}
+
 async function getReport(id: string, signal: AbortSignal | undefined): Promise<Response> {
   return guard("worker", async () => {
     // Bytes passthrough preserves the upstream content-type on ok and its
@@ -233,31 +325,37 @@ async function getDownload(req: Request, id: string): Promise<Response> {
   try {
     // a) task must exist and be completed
     const { status, data } = await upstreamJson("worker", `/research/${enc(id)}`, { signal });
-    if (status === 404) return jsonResponse({ error: "not found" }, 404);
-    if (status < 200 || status >= 300) return jsonResponse(data, status); // transient upstream error: passthrough
+    if (status === 404) return forBrowser(req, jsonResponse({ error: "not found" }, 404));
+    if (status < 200 || status >= 300) return forBrowser(req, jsonResponse(data, status)); // transient upstream error: passthrough
     const st = asRecord(data)?.status;
-    if (st === "running" || st === "queued") {
-      return jsonResponse({ status: st, task_id: id }, 409);
+    if (st === "running" || st === "queued" || st === "pending") {
+      return forBrowser(req, jsonResponse({ status: st, task_id: id }, 409));
     }
     if (st === "failed") {
       const rec = asRecord(data);
-      return jsonResponse(
-        { error: typeof rec?.error === "string" ? rec.error : "research task failed", task_id: id },
-        502,
+      return forBrowser(
+        req,
+        jsonResponse(
+          { error: typeof rec?.error === "string" ? rec.error : "research task failed", task_id: id },
+          502,
+        ),
       );
     }
     if (st !== "completed") {
-      return jsonResponse({ error: `task is not downloadable (status: ${String(st)})`, task_id: id }, 409);
+      return forBrowser(
+        req,
+        jsonResponse({ error: `task is not downloadable (status: ${String(st)})`, task_id: id }, 409),
+      );
     }
 
     // b) fetch the report envelope, then hand it to paperbot /render
     const reportRes = await upstreamFetch("worker", `/research/${enc(id)}/report`, { signal });
-    if (!reportRes.ok) return passthroughJson(reportRes, "worker", signal);
+    if (!reportRes.ok) return forBrowser(req, await passthroughJson(reportRes, "worker", signal));
     const reportText = await readText(reportRes, signal);
     if (signal?.aborted) return new Response(null, { status: 204 }); // client gone; release done via cancel
-    return renderViaPaperbot(reportText, format, pageFormat, title, validate, signal);
+    return forBrowser(req, await renderViaPaperbot(reportText, format, pageFormat, title, validate, signal));
   } catch (err) {
-    return mapUpstreamError(err, "worker");
+    return forBrowser(req, mapUpstreamError(err, "worker"));
   }
 }
 
@@ -299,5 +397,45 @@ async function postRender(req: Request): Promise<Response> {
       signal: clientSignal(req),
     });
     return toResponse(result, clientSignal(req));
+  });
+}
+
+// --- /documents (RAG staging, proxied to the worker) -----------------------
+//
+// GET/DELETE are JSON passthroughs; POST is a raw byte passthrough (multipart
+// upload) mirroring postRender — the client abort signal is threaded in, so an
+// abandoned upload releases the upstream socket mid-body.
+
+async function getDocuments(signal: AbortSignal | undefined): Promise<Response> {
+  return guard("worker", async () => {
+    // {staged, on_disk, indexed} — best-effort on the worker, never a 5xx.
+    const { status, data } = await upstreamJson("worker", "/documents", { signal });
+    return jsonResponse(data, status);
+  });
+}
+
+async function postDocuments(req: Request): Promise<Response> {
+  return guard("worker", async () => {
+    const qs = new URL(req.url).search; // verbatim, includes leading "?" when present
+    const headers: Record<string, string> = {};
+    const ct = req.headers.get("content-type");
+    if (ct) headers["content-type"] = ct;
+    const result = await upstreamBytes("worker", `/documents${qs}`, {
+      method: "POST",
+      headers,
+      body: req.body,
+      signal: clientSignal(req),
+    });
+    return toResponse(result, clientSignal(req));
+  });
+}
+
+async function deleteDocuments(signal: AbortSignal | undefined): Promise<Response> {
+  return guard("worker", async () => {
+    const { status, data } = await upstreamJson("worker", "/documents", {
+      method: "DELETE",
+      signal,
+    });
+    return jsonResponse(data, status);
   });
 }
