@@ -45,6 +45,11 @@ async function route(method: string, path: string, req: Request): Promise<Respon
   if (method === "POST" && path === "/research") return postResearch(req);
   if (method === "GET" && path === "/research") return getResearchList(clientSignal(req));
   if (method === "POST" && path === "/render") return postRender(req);
+  if (path === "/documents") {
+    if (method === "GET") return getDocuments(clientSignal(req));
+    if (method === "POST") return postDocuments(req);
+    if (method === "DELETE") return deleteDocuments(clientSignal(req));
+  }
 
   const segs = path.split("/").filter((s) => s.length > 0);
   if ((method === "GET" || method === "DELETE") && segs[0] === "research" && segs.length >= 2) {
@@ -125,6 +130,9 @@ function getIndex(): Response {
       "GET /research/{id}/download",
       "DELETE /research/{id}",
       "POST /render",
+      "GET /documents",
+      "POST /documents",
+      "DELETE /documents",
       "GET /health",
     ],
   });
@@ -315,5 +323,45 @@ async function postRender(req: Request): Promise<Response> {
       signal: clientSignal(req),
     });
     return toResponse(result, clientSignal(req));
+  });
+}
+
+// --- /documents (RAG staging, proxied to the worker) -----------------------
+//
+// GET/DELETE are JSON passthroughs; POST is a raw byte passthrough (multipart
+// upload) mirroring postRender — the client abort signal is threaded in, so an
+// abandoned upload releases the upstream socket mid-body.
+
+async function getDocuments(signal: AbortSignal | undefined): Promise<Response> {
+  return guard("worker", async () => {
+    // {staged, on_disk, indexed} — best-effort on the worker, never a 5xx.
+    const { status, data } = await upstreamJson("worker", "/documents", { signal });
+    return jsonResponse(data, status);
+  });
+}
+
+async function postDocuments(req: Request): Promise<Response> {
+  return guard("worker", async () => {
+    const qs = new URL(req.url).search; // verbatim, includes leading "?" when present
+    const headers: Record<string, string> = {};
+    const ct = req.headers.get("content-type");
+    if (ct) headers["content-type"] = ct;
+    const result = await upstreamBytes("worker", `/documents${qs}`, {
+      method: "POST",
+      headers,
+      body: req.body,
+      signal: clientSignal(req),
+    });
+    return toResponse(result, clientSignal(req));
+  });
+}
+
+async function deleteDocuments(signal: AbortSignal | undefined): Promise<Response> {
+  return guard("worker", async () => {
+    const { status, data } = await upstreamJson("worker", "/documents", {
+      method: "DELETE",
+      signal,
+    });
+    return jsonResponse(data, status);
   });
 }
