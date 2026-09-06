@@ -7,7 +7,7 @@
 import { api } from "@/lib/api";
 import { cx } from "@/lib/cx";
 import { fmtClock, fmtElapsed } from "@/lib/format";
-import type { StripStage } from "@/lib/stages";
+import { STAGE_NAMES, deriveStageStates, type StripStage } from "@/lib/stages";
 import type { Task, TaskStatus, TaskSummary } from "@/lib/types";
 import { PipelineStrip } from "./pipeline-strip";
 
@@ -70,7 +70,11 @@ export function TaskDetail({ task, summary, queuePosition, onDelete }: DetailPro
       {/* The stage derivation for the strip lands in the next commit. */}
       <div className="max-w-[720px]">
         <PipelineStrip
-          stages={task ? taskStages(task) : placeholderStages(status, base.current_step)}
+          stages={
+            task
+              ? deriveStageStates(task)
+              : placeholderStages(status, base.current_step)
+          }
           dim={status === "pending"}
         />
       </div>
@@ -158,41 +162,39 @@ function DeleteButton({ onClick }: { onClick: () => void }) {
 }
 
 // ---------------------------------------------------------------------------
-// Stage derivation (placeholder — replaced by lib/stages.ts in the next
-// commit): current_step's stage prefix maps onto the fixed 5-stage track.
-
-const STAGE_NAMES = ["Decompose", "Investigate", "Draft", "Critique", "Assemble"];
-const STAGE_KEYS = ["decompose", "investigate", "draft", "critique", "assemble"];
-
-function taskStages(task: Task): StripStage[] {
-  const last = task.steps[task.steps.length - 1];
-  return deriveStages(stageKey(last ? last.stage : task.current_step));
-}
+// The detail pane usually renders from the full record via
+// deriveStageStates (lib/stages.ts). This fallback covers the brief window
+// where only the list summary has arrived (summaries carry current_step
+// but no steps[]).
 
 function placeholderStages(status: TaskStatus, currentStep: string): StripStage[] {
-  if (status === "pending") return allTodo();
+  if (status === "pending") {
+    return STAGE_NAMES.map((name) => ({ name, state: "todo" as const }));
+  }
   if (status === "completed") {
     return STAGE_NAMES.map((name) => ({ name, state: "done" as const }));
   }
-  return deriveStages(stageKey(currentStep));
-}
-
-function allTodo() {
-  return STAGE_NAMES.map((name) => ({ name, state: "todo" as const }));
-}
-
-/** Stages before the given index = done, at it = current, after = todo.
-    Index -1 (pre-pipeline: queued/documents) lights the first stage. */
-function deriveStages(current: number): StripStage[] {
+  const current = stageKey(currentStep);
   return STAGE_NAMES.map((name, i) => ({
     name,
-    state: current === -1 ? (i === 0 ? "current" : "todo") : i < current ? "done" : i === current ? "current" : "todo",
+    state:
+      current === -1
+        ? i === 0
+          ? "current"
+          : "todo"
+        : i < current
+          ? "done"
+          : i === current
+            ? status === "failed"
+              ? "err"
+              : "current"
+            : "todo",
   }));
 }
 
 function stageKey(step: string): number {
   const key = step.split(":")[0].trim().toLowerCase();
-  if (key === "section") return STAGE_KEYS.indexOf("draft"); // drafting a section
+  if (key === "section") return 2; // drafting a section
   if (key === "documents" || key === "queued") return -1; // pre-pipeline
-  return STAGE_KEYS.indexOf(key);
+  return ["decompose", "investigate", "draft", "critique", "assemble"].indexOf(key);
 }

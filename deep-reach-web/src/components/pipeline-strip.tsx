@@ -23,8 +23,11 @@ export function PipelineStrip({
               aria-hidden
               className={cx(
                 "mt-[5px] h-px min-w-3 flex-1",
-                // a segment is lit once work has reached the node after it
-                dim || stage.state === "todo" ? "bg-hairline" : "bg-accent",
+                // a segment is lit once work has reached the node after it;
+                // error nodes leave their leading segment unlit
+                dim || stage.state === "todo" || stage.state === "err"
+                  ? "bg-hairline"
+                  : "bg-accent",
               )}
             />
           )}
@@ -35,6 +38,7 @@ export function PipelineStrip({
                 dim && "border border-dim/50",
                 !dim && stage.state === "done" && "bg-accent",
                 !dim && stage.state === "current" && "bg-accent animate-pulse-glow",
+                !dim && stage.state === "err" && "bg-err",
                 !dim && stage.state === "todo" && "border border-hairline",
               )}
             />
@@ -45,7 +49,9 @@ export function PipelineStrip({
                   ? "text-dim/70"
                   : stage.state === "todo"
                     ? "text-dim"
-                    : "text-text",
+                    : stage.state === "err"
+                      ? "text-err"
+                      : "text-text",
               )}
             >
               {stage.name}
