@@ -34,6 +34,7 @@ curl -s localhost:8321/health
 | POST | `/research` | Start or queue a run → 202 with task id (queued as `pending` while one is running, 422 on invalid body) |
 | GET | `/research` | List all tasks (summaries) |
 | GET | `/research/{id}` | Full task record: status, current_step, step timeline, stats |
+| DELETE | `/research/{id}` | Remove a queued/finished task → 200 {deleted, documents} (409 while running, 404 unknown) |
 | GET | `/research/{id}/report` | Raw structured report JSON once completed |
 | GET | `/health` | Service status, incl. whether the deep pipeline is configured |
 | POST | `/documents` | Stage PDF files for the next research task → 201 {documents, rejected} (400 if all rejected) |
@@ -112,6 +113,34 @@ Other responses:
 ```
 
 404, unknown id: `{"error": "unknown task: <id>"}`
+
+### DELETE /research/{id}
+
+Removes a task record from the in-memory store (and cleans up its
+documents — below). There is no other way to free a finished task's
+record; a worker restart also clears all of them.
+
+| Status | When |
+| ------ | ---- |
+| 200    | `pending` or terminal (`completed`/`failed`) task: the record is popped. Body: `{"deleted": "<id>", "documents": [names cleaned, or []]}` |
+| 409    | `running` task: `{"error": "cannot delete a running task", "task_id": "<id>"}` — Python threads cannot be killed, so the run is left to finish on its own (its exit-cleanup still runs, and the task becomes deletable once terminal) |
+| 404    | Unknown id: `{"error": "unknown task: <id>"}` |
+
+Document cleanup on delete: a deleted record carrying documents has its
+files removed from the docs dir and the vector store reconciled against
+what remains — the same idempotent cleanup (unlink `missing_ok` +
+reconcile) the run exit performs. For a `pending` task this matters most:
+its attached files were never ingested (the task never started), and
+removing them plus purging any of their points keeps the next run's corpus
+clean. The staging registry is not re-populated (the files belonged to the
+deleted task).
+
+Watchdog/zombie interaction: a run the watchdog has marked `failed` may
+keep executing in the background (a zombie holding the pipeline lock). Its
+record is no longer "running", so deleting it is allowed immediately; the
+zombie thread keeps going until the pipeline finishes on its own, and its
+own exit-cleanup (idempotent) still runs. Deleting never affects the queue
+pump — the queue advances only when the zombie truly stops.
 
 ### GET /research/{id}/report
 
