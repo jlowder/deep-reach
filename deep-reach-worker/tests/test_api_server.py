@@ -481,6 +481,178 @@ def test_health(client):
 
 
 # ---------------------------------------------------------------------------
+# DELETE /research/{id}
+# ---------------------------------------------------------------------------
+
+
+def _stub_docs_env(monkeypatch, tmp_path, calls):
+    """Hermetic docs dir + recording stubs for the vector-store seams."""
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    monkeypatch.setattr(api_server, "DEFAULT_DOCS_DIR", docs_dir)
+    monkeypatch.setattr(
+        api_server,
+        "ingest_documents",
+        lambda d: calls.append(("ingest", d)) or {"num_pdfs": 0, "num_chunks": 0},
+    )
+    monkeypatch.setattr(
+        api_server, "reconcile_corpus", lambda d=None: calls.append(("reconcile", d))
+    )
+    return docs_dir
+
+
+def _upload(client: TestClient, *names: str) -> None:
+    files = [("files", (n, b"%PDF-1.4 fake", "application/pdf")) for n in names]
+    client.post("/documents", files=files)
+
+
+def test_delete_running_is_409():
+    """A running task cannot be deleted: Python threads cannot be killed,
+    so the run is left to finish; once terminal, the same delete succeeds."""
+    release = threading.Event()
+
+    def run_fn(topic, **kwargs):
+        release.wait(timeout=10)
+        return {
+            "final_answer": f"done {topic}",
+            "state": {"report_json": _fake_report_json(topic)},
+            "stats": {"llm_calls": 1},
+        }
+
+    client = TestClient(api_server.create_app(run_fn=run_fn))
+    task_id = client.post("/research", json={"topic": "t"}).json()["task_id"]
+    resp = client.delete(f"/research/{task_id}")
+    assert resp.status_code == 409
+    assert resp.json() == {"error": "cannot delete a running task", "task_id": task_id}
+    assert client.get(f"/research/{task_id}").status_code == 200  # still there
+    release.set()
+    _wait(client, task_id)
+    assert client.delete(f"/research/{task_id}").status_code == 200
+
+
+def test_delete_unknown_is_404(client):
+    resp = client.delete("/research/deadbeef")
+    assert resp.status_code == 404
+    assert resp.json()["error"] == "unknown task: deadbeef"
+
+
+def test_delete_completed_removes_from_store(client):
+    task_id = client.post("/research", json={"topic": "tiny topic"}).json()["task_id"]
+    _wait(client, task_id)
+    resp = client.delete(f"/research/{task_id}")
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": task_id, "documents": []}
+    assert client.get(f"/research/{task_id}").status_code == 404
+    assert client.get(f"/research/{task_id}/report").status_code == 404
+    assert client.get("/research").json()["tasks"] == []
+    health = client.get("/health").json()
+    assert health["running"] is False and health["pending"] == 0
+
+
+def test_delete_pending_head_and_pump_promotes_next():
+    """Deleting the head of the pending queue: the record is gone from the
+    list, and the completion pump then promotes the NEXT surviving pending
+    task (FIFO intact after the deletion)."""
+    release = threading.Event()
+
+    def run_fn(topic, **kwargs):
+        run_fn.calls.append(topic)
+        release.wait(timeout=10)
+        return {
+            "final_answer": f"done {topic}",
+            "state": {"report_json": _fake_report_json(topic)},
+            "stats": {"llm_calls": 1},
+        }
+
+    run_fn.calls = []
+    client = TestClient(api_server.create_app(run_fn=run_fn))
+    first = client.post("/research", json={"topic": "one"}).json()["task_id"]
+    second = client.post("/research", json={"topic": "two"}).json()["task_id"]
+    third = client.post("/research", json={"topic": "three"}).json()["task_id"]
+    resp = client.delete(f"/research/{second}")
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": second, "documents": []}
+    assert client.get(f"/research/{second}").status_code == 404
+    listed = {t["id"]: t["status"] for t in client.get("/research").json()["tasks"]}
+    assert listed == {first: "running", third: "pending"}
+    release.set()
+    _wait(client, first)
+    # the pump started the survivor, never the deleted task
+    _wait_for(lambda: run_fn.calls == ["one", "three"])
+    _wait(client, third)
+
+
+def test_delete_pending_task_cleans_its_documents(monkeypatch, tmp_path):
+    """A deleted PENDING task never started, so its attached files were
+    never ingested and still sit in the docs dir: the delete removes them
+    and reconciles, so the next run's corpus is clean. The running task's
+    documents are untouched."""
+    calls = []
+    docs_dir = _stub_docs_env(monkeypatch, tmp_path, calls)
+    release = threading.Event()
+
+    def run_fn(topic, **kwargs):
+        run_fn.calls.append(topic)
+        release.wait(timeout=10)
+        return {"final_answer": "x", "state": {}, "stats": {}}
+
+    run_fn.calls = []
+    client = TestClient(api_server.create_app(run_fn=run_fn))
+    _upload(client, "alpha.pdf", "beta.pdf")
+    first = client.post("/research", json={"topic": "one"}).json()
+    assert first["documents"] == ["alpha.pdf", "beta.pdf"]
+    # first's worker: index-at-start (reconcile + ingest) then waits in fn
+    _wait_for(lambda: run_fn.calls == ["one"])
+    _upload(client, "gamma.pdf", "delta.pdf")
+    second = client.post("/research", json={"topic": "two"}).json()
+    assert second["status"] == "pending"
+    assert second["documents"] == ["gamma.pdf", "delta.pdf"]
+    calls.clear()  # deterministic baseline after first's index-at-start
+    resp = client.delete(f"/research/{second['task_id']}")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "deleted": second["task_id"],
+        "documents": ["gamma.pdf", "delta.pdf"],
+    }
+    assert not (docs_dir / "gamma.pdf").exists()
+    assert not (docs_dir / "delta.pdf").exists()
+    assert (docs_dir / "alpha.pdf").exists() and (docs_dir / "beta.pdf").exists()
+    # one reconcile from the delete; the pending task was never ingested
+    assert calls == [("reconcile", docs_dir)]
+    release.set()
+    _wait(client, first["task_id"])
+    # first's own exit-cleanup still ran afterwards (idempotent re-cleanup)
+    assert not (docs_dir / "alpha.pdf").exists()
+    assert calls.count(("reconcile", docs_dir)) == 2
+    assert ("ingest", docs_dir) not in calls
+
+
+def test_delete_completed_task_reruns_cleanup_idempotently(monkeypatch, tmp_path):
+    """A completed task's documents were already cleaned up at exit; the
+    delete re-runs the same cleanup (unlink missing_ok + reconcile) without
+    error and reports the record's document list."""
+    calls = []
+    docs_dir = _stub_docs_env(monkeypatch, tmp_path, calls)
+
+    def run_fn(topic, **kwargs):
+        return {"final_answer": "x", "state": {}, "stats": {}}
+
+    client = TestClient(api_server.create_app(run_fn=run_fn))
+    _upload(client, "alpha.pdf")
+    body = client.post("/research", json={"topic": "t"}).json()
+    _wait(client, body["task_id"])
+    # worker exit: the file is already gone, start + exit reconciled
+    assert not (docs_dir / "alpha.pdf").exists()
+    assert calls.count(("reconcile", docs_dir)) == 2
+    calls.clear()
+    resp = client.delete(f"/research/{body['task_id']}")
+    assert resp.status_code == 200
+    assert resp.json() == {"deleted": body["task_id"], "documents": ["alpha.pdf"]}
+    assert calls == [("reconcile", docs_dir)]  # idempotent re-run
+    assert client.get("/research").json()["tasks"] == []
+
+
+# ---------------------------------------------------------------------------
 # CORS (browser-based clients)
 # ---------------------------------------------------------------------------
 
