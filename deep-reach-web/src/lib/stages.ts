@@ -1,8 +1,7 @@
 import type { Task } from "./types";
 
 // The fixed 5-stage pipeline track. Stage KEYS are the worker's on_stage
-// names; the display names are the design's labels. (The derivation logic
-// that maps a task onto this track lands in the next commit.)
+// names; the display names are the design's labels.
 
 export const STAGE_KEYS = [
   "decompose",

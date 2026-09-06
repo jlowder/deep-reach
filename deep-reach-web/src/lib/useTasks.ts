@@ -39,15 +39,22 @@ export function useTasks(intervalMs = 2000) {
   useEffect(() => {
     alive.current = true;
     let timer: number | undefined;
+    let inFlight = false; // a tick already running — never start a second chain
     const tick = async () => {
       timer = undefined;
       if (document.hidden) return; // paused; visibilitychange resumes
-      await refresh();
-      if (alive.current) timer = window.setTimeout(tick, intervalMs);
+      if (inFlight) return; // one tick at a time; the settler reschedules
+      inFlight = true;
+      try {
+        await refresh();
+      } finally {
+        inFlight = false;
+      }
+      if (alive.current && !document.hidden) timer = window.setTimeout(tick, intervalMs);
     };
     void tick();
     const onVisibility = () => {
-      if (!document.hidden && timer === undefined) void tick();
+      if (!document.hidden && timer === undefined && !inFlight) void tick();
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
@@ -96,28 +103,37 @@ export function useTaskDetail(
     if (!id) return;
     alive.current = true;
     let timer: number | undefined;
+    let inFlight = false; // a tick already running — never start a second chain
     const tick = async () => {
       timer = undefined;
       if (document.hidden) return;
+      if (inFlight) return; // one tick at a time; the settler reschedules
+      inFlight = true;
       try {
-        const task = await api.getTask(id);
-        if (!alive.current) return;
-        setState((s) =>
-          s.id === id ? { id, task, error: null } : s,
-        );
-      } catch (err) {
-        if (!alive.current) return;
-        if (err instanceof ApiError && err.status === 404) {
-          setState((s) => (s.id === id ? { id, task: null, error: null } : s));
-        } else {
-          setState((s) => (s.id === id ? { id, task: s.task, error: message(err) } : s));
+        try {
+          const task = await api.getTask(id);
+          if (!alive.current) return;
+          setState((s) =>
+            s.id === id ? { id, task, error: null } : s,
+          );
+        } catch (err) {
+          if (!alive.current) return;
+          if (err instanceof ApiError && err.status === 404) {
+            setState((s) => (s.id === id ? { id, task: null, error: null } : s));
+          } else {
+            setState((s) => (s.id === id ? { id, task: s.task, error: message(err) } : s));
+          }
         }
+      } finally {
+        inFlight = false;
       }
-      if (alive.current && active) timer = window.setTimeout(tick, intervalMs);
+      if (alive.current && active && !document.hidden) {
+        timer = window.setTimeout(tick, intervalMs);
+      }
     };
     void tick();
     const onVisibility = () => {
-      if (!document.hidden && timer === undefined) void tick();
+      if (!document.hidden && timer === undefined && !inFlight) void tick();
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => {

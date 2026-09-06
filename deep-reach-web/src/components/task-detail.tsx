@@ -26,10 +26,12 @@ export interface DetailProps {
   summary?: TaskSummary | null;
   /** pending queue position (1-based), when the task is pending */
   queuePosition?: number;
+  /** a failed detail poll (5xx / network) — stale data is still shown */
+  updateError?: string | null;
   onDelete: (id: string) => void;
 }
 
-export function TaskDetail({ task, summary, queuePosition, onDelete }: DetailProps) {
+export function TaskDetail({ task, summary, queuePosition, updateError, onDelete }: DetailProps) {
   const base = task ?? summary;
   if (!base) return null;
   const status = base.status;
@@ -62,14 +64,22 @@ export function TaskDetail({ task, summary, queuePosition, onDelete }: DetailPro
         {fmtElapsed(base.started_at, base.finished_at)}
       </p>
 
+      {updateError && (
+        <p
+          role="status"
+          className="max-w-[720px] border border-err-hairline bg-err-soft/30 px-3 py-1.5 font-mono text-[11px] text-err"
+        >
+          task update failed — showing last known state
+        </p>
+      )}
+
       {status === "running" && last && (
         <p aria-live="polite" className="max-w-[720px] font-mono text-[12px] text-dim">
           ▸ {last.detail} · {fmtClock(last.ts)}
         </p>
       )}
 
-      {/* The stage derivation for the strip lands in the next commit. The
-          strip is decorative for screen readers — the ticker carries state. */}
+      {/* Decorative for screen readers — the ticker carries state. */}
       <div aria-hidden="true" className="max-w-[720px]">
         <PipelineStrip
           stages={

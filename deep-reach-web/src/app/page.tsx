@@ -6,6 +6,7 @@
 
 import { useState } from "react";
 import { EmptyState } from "@/components/empty-state";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { Rail } from "@/components/rail";
 import { TaskDetail } from "@/components/task-detail";
 import { TaskList } from "@/components/task-list";
@@ -30,7 +31,7 @@ export default function Page() {
   const detailActive =
     selectedSummary !== null &&
     (selectedSummary.status === "running" || selectedSummary.status === "pending");
-  const { task: detailTask } = useTaskDetail(selectedId, detailActive);
+  const { task: detailTask, error: detailError } = useTaskDetail(selectedId, detailActive);
 
   const pendingCount = tasks?.filter((t) => t.status === "pending").length ?? 0;
   const runningCount = tasks?.filter((t) => t.status === "running").length ?? 0;
@@ -42,7 +43,8 @@ export default function Page() {
   const hasContent = (selectedSummary ?? detailTask) !== null;
 
   return (
-    <div className="grid min-h-dvh grid-cols-1 min-[960px]:grid-cols-[320px_1fr]">
+    <ErrorBoundary>
+      <div className="grid min-h-dvh grid-cols-1 min-[960px]:grid-cols-[320px_1fr]">
       <Rail
         pendingCount={pendingCount}
         runningCount={runningCount}
@@ -85,6 +87,7 @@ export default function Page() {
               task={detailTask}
               summary={selectedSummary}
               queuePosition={queuePosition}
+              updateError={detailError ?? null}
               onDelete={removeTask}
             />
           </div>
@@ -93,5 +96,6 @@ export default function Page() {
         )}
       </main>
     </div>
+    </ErrorBoundary>
   );
 }
