@@ -160,6 +160,7 @@ export function Rail({ pendingCount, runningCount, onCreated }: RailProps) {
               </span>
               <textarea
                 rows={3}
+                aria-label="Research topic"
                 value={topic}
                 onChange={(e) => setTopic(e.target.value)}
                 placeholder="What should we dig into?"

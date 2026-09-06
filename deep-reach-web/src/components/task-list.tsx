@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { cx } from "@/lib/cx";
 import { fmtElapsed } from "@/lib/format";
 import type { TaskSummary } from "@/lib/types";
@@ -46,8 +47,42 @@ export function TaskList({
   onDelete: (id: string) => void;
 }) {
   const pendingIds = tasks.filter((t) => t.status === "pending");
+  const listRef = useRef<HTMLDivElement>(null);
+
+  // Keyboard: ArrowUp/Down step between rows, Home/End jump, Enter activates
+  // (rows handle Enter/Space themselves). Focus follows the selection.
+  function onListKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    e.preventDefault();
+    const rows = Array.from(
+      listRef.current?.querySelectorAll<HTMLElement>("[data-task-row]") ?? [],
+    );
+    if (rows.length === 0) return;
+    const active = document.activeElement;
+    const current = rows.findIndex((r) => r === active || r.contains(active as Node));
+    let next: number;
+    if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = rows.length - 1;
+    else if (current === -1)
+      next = e.key === "ArrowDown" ? 0 : rows.length - 1;
+    else
+      next = Math.min(
+        rows.length - 1,
+        Math.max(0, current + (e.key === "ArrowDown" ? 1 : -1)),
+      );
+    rows[next].focus();
+    onSelect(tasks[next].id);
+  }
+
   return (
-    <div className="flex min-w-0 flex-col">
+    <div
+      ref={listRef}
+      role="group"
+      aria-label="Research tasks"
+      tabIndex={0}
+      onKeyDown={onListKeyDown}
+      className="flex min-w-0 flex-col"
+    >
       {tasks.map((task, i) => {
         const selected = task.id === selectedId;
         const label = stepLabel(task);
@@ -60,7 +95,9 @@ export function TaskList({
             key={task.id}
             role="button"
             tabIndex={0}
+            data-task-row
             aria-current={selected ? "true" : undefined}
+            aria-label={`Task: ${task.topic}, ${task.status}`}
             onClick={() => onSelect(task.id)}
             onKeyDown={(e) => {
               if (e.key === "Enter" || e.key === " ") {
@@ -101,21 +138,45 @@ export function TaskList({
                 : fmtElapsed(task.started_at, task.finished_at)}
             </span>
             {task.status !== "running" && (
-              <button
-                type="button"
-                aria-label={`Delete task: ${task.topic}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete(task.id);
-                }}
-                className="justify-self-end px-1 font-mono text-[11px] text-dim hover:text-err"
-              >
-                ×
-              </button>
+              <RowDelete topic={task.topic} onFire={() => onDelete(task.id)} />
             )}
           </div>
         );
       })}
     </div>
+  );
+}
+
+// Armed inline delete: first press turns the × into a red "!" for 2.5 s;
+// a second press fires. No dialog — faster, and the armed state is the
+// visible confirmation.
+function RowDelete({ topic, onFire }: { topic: string; onFire: () => void }) {
+  const [armed, setArmed] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+  return (
+    <button
+      type="button"
+      aria-pressed={armed}
+      aria-label={armed ? `Delete task: ${topic}, press again to confirm` : `Delete task: ${topic}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        if (!armed) {
+          setArmed(true);
+          window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => setArmed(false), 2500);
+          return;
+        }
+        window.clearTimeout(timer.current);
+        setArmed(false);
+        onFire();
+      }}
+      className={cx(
+        "justify-self-end px-1 font-mono text-[11px]",
+        armed ? "font-bold text-err" : "text-dim hover:text-err",
+      )}
+    >
+      {armed ? "!" : "×"}
+    </button>
   );
 }

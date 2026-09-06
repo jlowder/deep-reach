@@ -4,11 +4,12 @@
 // arrived, falling back to the list summary in the gap; a null of both
 // (deleted / unknown) renders nothing — the page shows the empty state.
 
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { cx } from "@/lib/cx";
 import { fmtClock, fmtElapsed } from "@/lib/format";
 import { STAGE_NAMES, deriveStageStates, type StripStage } from "@/lib/stages";
-import type { Task, TaskStatus, TaskSummary } from "@/lib/types";
+import type { Task, TaskStatus, TaskStep, TaskSummary } from "@/lib/types";
 import { PipelineStrip } from "./pipeline-strip";
 
 const CHIP: Record<TaskStatus, string> = {
@@ -67,8 +68,9 @@ export function TaskDetail({ task, summary, queuePosition, onDelete }: DetailPro
         </p>
       )}
 
-      {/* The stage derivation for the strip lands in the next commit. */}
-      <div className="max-w-[720px]">
+      {/* The stage derivation for the strip lands in the next commit. The
+          strip is decorative for screen readers — the ticker carries state. */}
+      <div aria-hidden="true" className="max-w-[720px]">
         <PipelineStrip
           stages={
             task
@@ -79,11 +81,7 @@ export function TaskDetail({ task, summary, queuePosition, onDelete }: DetailPro
         />
       </div>
 
-      {status === "pending" && (
-        <p className="font-mono text-[12px] text-dim">
-          waiting in queue — position {queuePosition ?? "—"}
-        </p>
-      )}
+      <StepLog steps={task?.steps ?? []} status={status} queuePosition={queuePosition} />
 
       {status === "completed" && (
         <>
@@ -150,14 +148,98 @@ function ActionButton({ label, onClick }: { label: string; onClick: () => void }
 }
 
 function DeleteButton({ onClick }: { onClick: () => void }) {
+  // No confirm dialog (fast console): first press arms the button ("Sure?",
+  // error color) for 2.5 s; a second press fires. Any other key/timeout
+  // disarms it.
+  const [armed, setArmed] = useState(false);
+  const timer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(timer.current), []);
   return (
     <button
       type="button"
-      onClick={onClick}
-      className="rounded-none px-2 py-2 font-display text-[12px] font-semibold uppercase tracking-[0.12em] text-dim hover:text-err"
+      aria-pressed={armed}
+      onClick={() => {
+        if (!armed) {
+          setArmed(true);
+          window.clearTimeout(timer.current);
+          timer.current = window.setTimeout(() => setArmed(false), 2500);
+          return;
+        }
+        window.clearTimeout(timer.current);
+        setArmed(false);
+        onClick();
+      }}
+      className={cx(
+        "rounded-none px-2 py-2 font-display text-[12px] font-semibold uppercase tracking-[0.12em]",
+        armed ? "text-err" : "text-dim hover:text-err",
+      )}
     >
-      Delete task
+      {armed ? "Sure?" : "Delete task"}
     </button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Step log: one line per step, newest at the bottom, "hh:mm:ss · STAGE ·
+// detail". Grows live for running tasks (the 1.5 s detail poll); pending
+// shows the queue notice instead. Auto-scrolls to the bottom on new steps —
+// an instant jump, never smooth, so reduced-motion users get no scroll
+// animation. aria-hidden: the ticker is the screen-reader channel for state.
+
+function StepLog({
+  steps,
+  status,
+  queuePosition,
+}: {
+  steps: TaskStep[];
+  status: TaskStatus;
+  queuePosition?: number;
+}) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [steps.length]);
+
+  if (status === "pending") {
+    return (
+      <p className="font-mono text-[12px] text-dim">
+        waiting in queue — position {queuePosition ?? "—"}
+      </p>
+    );
+  }
+  if (steps.length === 0) {
+    return <p className="font-mono text-[12px] text-dim">no steps yet</p>;
+  }
+  return (
+    <div
+      ref={boxRef}
+      aria-hidden="true"
+      className="max-h-[40vh] overflow-y-auto border-t border-hairline pt-3"
+    >
+      <ol className="flex flex-col gap-1">
+        {steps.map((s, i) => (
+          <li
+            key={`${s.ts}-${i}`}
+            title={s.detail}
+            className="line-clamp-2 font-mono text-[12px] text-dim"
+          >
+            <span className="tabular-nums text-dim/70">{fmtClock(s.ts)}</span>
+            <span className="text-dim/40"> · </span>
+            <span
+              className={cx(
+                "text-[10px] uppercase tracking-[0.1em]",
+                i === steps.length - 1 ? "text-accent" : "text-dim",
+              )}
+            >
+              {s.stage}
+            </span>
+            <span className="text-dim/40"> · </span>
+            <span>{s.detail}</span>
+          </li>
+        ))}
+      </ol>
+    </div>
   );
 }
 
