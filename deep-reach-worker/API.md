@@ -6,8 +6,8 @@ A FastAPI service exposing the 5-stage deep-research pipeline over HTTP. POST a 
 
 - Same pipeline as the Gradio UI's deep mode (`deep_research` in `deep_research_orchestrator.py`) — just the HTTP layer, no UI.
 - In-memory task store: single process; tasks do not survive a restart.
-- One run at a time: `deep_research` holds a process lock, and the service returns 409 while a run is in progress.
-- A per-task watchdog (45 min by default) marks a run that exceeds the deadline as failed.
+- One run at a time, FIFO queue: `deep_research` holds a process lock, so at most one run executes at a time. A POST accepted while a run is in progress is **queued** (status `pending`, `current_step` `"queued"`, no thread) and a pump starts the oldest queued task as soon as the pipeline is free — the API never returns 409 for a busy pipeline.
+- A per-task watchdog (45 min by default) marks a run that exceeds the deadline as failed. Threads cannot be killed, so a watchdog-killed run keeps executing in the background until it finishes; the queue only advances when the run has **truly** stopped (the pipeline lock is released).
 - The finished report is the canonical `ResearchReport` JSON (the same structured document deep mode saves under `reports/`), which is exactly what paperbot's `POST /render` accepts.
 
 ## Quick start
@@ -30,7 +30,7 @@ curl -s localhost:8321/health
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/research` | Start a run → 202 with task id (409 while one is running, 422 on invalid body) |
+| POST | `/research` | Start or queue a run → 202 with task id (queued as `pending` while one is running, 422 on invalid body) |
 | GET | `/research` | List all tasks (summaries) |
 | GET | `/research/{id}` | Full task record: status, current_step, step timeline, stats |
 | GET | `/research/{id}/report` | Raw structured report JSON once completed |
@@ -47,7 +47,7 @@ Body:
 | `budget_doc` | int | 10 | Max doc chunks kept per sub-question. |
 | `budget_web` | int | 5 | Max web results kept per sub-question. |
 
-202 Accepted:
+202 Accepted — the run starts immediately when the pipeline is free, or is queued (FIFO) when a run is in progress:
 
 ```json
 {
@@ -61,9 +61,10 @@ Body:
 }
 ```
 
+`status` is `"running"` when the task starts immediately, or `"pending"` when it is queued behind an in-progress run (the body shape is otherwise identical; `current_step` stays `"queued"` until the pump promotes the task, and — as for any new run — until the pipeline's first stage callback updates it). Queued tasks are started oldest-first (FIFO) as the pipeline frees up, with no further client action.
+
 Other responses:
 
-- 409, while another run is in progress: `{"error": "a research run is already in progress", "running_task_id": "<id>"}`
 - 422, invalid body (e.g. empty `topic`)
 
 ### GET /research
@@ -123,16 +124,16 @@ Other responses:
 }
 ```
 
-- 409, while running or failed: `{"status": "running"}` (or `"failed"`)
+- 409, while pending, running, or failed: `{"status": "pending"}`, `{"status": "running"}` or `{"status": "failed"}`
 - 404, unknown id: `{"error": "unknown task: <id>"}`
 
 ### GET /health
 
 ```json
-{"service": "multi-agent-rag-researcher", "running": false, "deep_configured": true}
+{"service": "multi-agent-rag-researcher", "running": false, "pending": 0, "deep_configured": true}
 ```
 
-`running` is true while any task is in progress; `deep_configured` is true when the config has both an endpoint and an API key.
+`running` is true while any task is executing; `pending` is the count of queued (not yet started) tasks; `deep_configured` is true when the config has both an endpoint and an API key.
 
 ## Step tracking
 
@@ -155,12 +156,18 @@ Poll `GET /research/{id}` (every ~10 s) and watch `current_step` advance through
 ## Status lifecycle
 
 ```
-running ──▶ completed   pipeline returns; stats + report stored
-        └──▶ failed     exception (error = "<ExceptionType>: <message>")
-                            or watchdog timeout (error = "timed out after 2700s")
+pending ──▶ running ──▶ completed   pipeline returns; stats + report stored
+   │          │         └──▶ failed  exception (error = "<ExceptionType>: <message>")
+   │          │                         or watchdog timeout (error = "timed out after 2700s")
+   └──────────┘ (the pump promotes the oldest pending task to running —
+                 a newly promoted task also briefly shows current_step "queued")
 ```
 
-Known limitation: Python threads cannot be killed. A run the watchdog has marked failed keeps executing in the background until the pipeline finishes on its own, and the service keeps rejecting new runs with 409 until it does.
+- **pending** — the run was requested while another run was in progress; it waits in the FIFO queue with no thread, `current_step` `"queued"`.
+- **running** — the pump (or an idle POST) started it; a worker thread + watchdog thread are live.
+- **completed / failed** — terminal; the worker's exit triggers the pump, which starts the oldest pending task.
+
+Queue advance semantics: the pump runs when a run has **truly stopped** (its run thread has returned and released the pipeline's process lock). Known limitation: Python threads cannot be killed. A run the watchdog has marked failed keeps executing in the background until the pipeline finishes on its own — and the queue advances only at that moment, not when the watchdog fired. Because a queued run can only start after the in-progress one has fully released, a long zombie run simply delays queued tasks; it cannot wedge them permanently.
 
 ## Integration with paperbot
 
