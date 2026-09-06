@@ -47,16 +47,19 @@ async function route(method: string, path: string, req: Request): Promise<Respon
   if (method === "POST" && path === "/render") return postRender(req);
 
   const segs = path.split("/").filter((s) => s.length > 0);
-  if (method === "GET" && segs[0] === "research" && segs.length >= 2) {
+  if ((method === "GET" || method === "DELETE") && segs[0] === "research" && segs.length >= 2) {
     let id: string;
     try {
       id = decodeURIComponent(segs[1]);
     } catch {
       return jsonResponse({ error: "invalid task id" }, 400);
     }
-    if (segs.length === 2) return getResearch(id, clientSignal(req));
-    if (segs.length === 3 && segs[2] === "report") return getReport(id, clientSignal(req));
-    if (segs.length === 3 && segs[2] === "download") return getDownload(req, id);
+    if (method === "GET") {
+      if (segs.length === 2) return getResearch(id, clientSignal(req));
+      if (segs.length === 3 && segs[2] === "report") return getReport(id, clientSignal(req));
+      if (segs.length === 3 && segs[2] === "download") return getDownload(req, id);
+    }
+    if (method === "DELETE" && segs.length === 2) return deleteResearch(id, clientSignal(req));
   }
 
   return jsonResponse({ error: "not found" }, 404);
@@ -120,6 +123,7 @@ function getIndex(): Response {
       "GET /research/{id}",
       "GET /research/{id}/report",
       "GET /research/{id}/download",
+      "DELETE /research/{id}",
       "POST /render",
       "GET /health",
     ],
@@ -200,6 +204,18 @@ async function getResearch(id: string, signal: AbortSignal | undefined): Promise
     if (rec && status === 200) {
       return jsonResponse(rewriteLinks("", { id: taskId(rec) ?? id }, rec), status);
     }
+    return jsonResponse(data, status);
+  });
+}
+
+async function deleteResearch(id: string, signal: AbortSignal | undefined): Promise<Response> {
+  return guard("worker", async () => {
+    // Status + JSON body passthrough (200 removed / 409 running / 404 unknown
+    // on the worker; every non-2xx body passes through verbatim).
+    const { status, data } = await upstreamJson("worker", `/research/${enc(id)}`, {
+      method: "DELETE",
+      signal,
+    });
     return jsonResponse(data, status);
   });
 }
