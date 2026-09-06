@@ -38,6 +38,8 @@ export function useTasks(intervalMs = 2000) {
 
   useEffect(() => {
     alive.current = true;
+    let chainAlive = true; // closure-local: a ref is shared across the
+    // dev strict-mode double-mount, which would let a dead chain reschedule
     let timer: number | undefined;
     let inFlight = false; // a tick already running — never start a second chain
     const tick = async () => {
@@ -50,7 +52,7 @@ export function useTasks(intervalMs = 2000) {
       } finally {
         inFlight = false;
       }
-      if (alive.current && !document.hidden) timer = window.setTimeout(tick, intervalMs);
+      if (chainAlive && !document.hidden) timer = window.setTimeout(tick, intervalMs);
     };
     void tick();
     const onVisibility = () => {
@@ -58,6 +60,7 @@ export function useTasks(intervalMs = 2000) {
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
+      chainAlive = false;
       alive.current = false;
       if (timer !== undefined) window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibility);
@@ -85,6 +88,9 @@ export function useTaskDetail(
   active: boolean,
   intervalMs = 1500,
 ) {
+  // `alive` is intentionally a closure-local (not a ref): dev strict-mode
+  // double-mounts effects, and a shared ref would let the dead first chain
+  // reschedule after the second chain resets it — permanent double polling.
   const [state, setState] = useState<{
     id: string | null;
     task: Task | null;
@@ -97,11 +103,9 @@ export function useTaskDetail(
     setState({ id, task: null, error: null });
   }
 
-  const alive = useRef(true);
-
   useEffect(() => {
     if (!id) return;
-    alive.current = true;
+    let chainAlive = true;
     let timer: number | undefined;
     let inFlight = false; // a tick already running — never start a second chain
     const tick = async () => {
@@ -112,12 +116,12 @@ export function useTaskDetail(
       try {
         try {
           const task = await api.getTask(id);
-          if (!alive.current) return;
+          if (!chainAlive) return;
           setState((s) =>
             s.id === id ? { id, task, error: null } : s,
           );
         } catch (err) {
-          if (!alive.current) return;
+          if (!chainAlive) return;
           if (err instanceof ApiError && err.status === 404) {
             setState((s) => (s.id === id ? { id, task: null, error: null } : s));
           } else {
@@ -127,7 +131,7 @@ export function useTaskDetail(
       } finally {
         inFlight = false;
       }
-      if (alive.current && active && !document.hidden) {
+      if (chainAlive && active && !document.hidden) {
         timer = window.setTimeout(tick, intervalMs);
       }
     };
@@ -137,7 +141,7 @@ export function useTaskDetail(
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      alive.current = false;
+      chainAlive = false;
       if (timer !== undefined) window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibility);
     };
