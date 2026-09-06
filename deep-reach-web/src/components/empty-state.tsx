@@ -1,4 +1,4 @@
-import { STAGES } from "@/lib/samples";
+import { STAGE_NAMES } from "@/lib/stages";
 import { PipelineStrip } from "./pipeline-strip";
 
 /** No tasks at all: one faint, all-dim pipeline strip as the decoration. */
@@ -14,7 +14,7 @@ export function EmptyState() {
       <div className="w-80 max-w-full opacity-60">
         <PipelineStrip
           dim
-          stages={STAGES.map((name) => ({ name, state: "todo" as const }))}
+          stages={STAGE_NAMES.map((name) => ({ name, state: "todo" as const }))}
         />
       </div>
     </div>

@@ -1,6 +1,6 @@
 import { Fragment } from "react";
 import { cx } from "@/lib/cx";
-import type { SampleStage } from "@/lib/samples";
+import type { StripStage } from "@/lib/stages";
 
 /**
  * THE SIGNATURE — five pipeline nodes on a 1px track.
@@ -11,7 +11,7 @@ export function PipelineStrip({
   stages,
   dim = false,
 }: {
-  stages: SampleStage[];
+  stages: StripStage[];
   dim?: boolean;
 }) {
   return (

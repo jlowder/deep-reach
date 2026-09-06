@@ -1,9 +1,10 @@
 "use client";
 
 import { cx } from "@/lib/cx";
-import type { SampleTask, TaskStatus } from "@/lib/samples";
+import { fmtElapsed } from "@/lib/format";
+import type { TaskSummary } from "@/lib/types";
 
-function Lamp({ status }: { status: TaskStatus }) {
+function Lamp({ status }: { status: TaskSummary["status"] }) {
   return (
     <span
       aria-hidden
@@ -18,57 +19,63 @@ function Lamp({ status }: { status: TaskStatus }) {
   );
 }
 
-function StepLabel({ task }: { task: SampleTask }) {
+/** "draft: drafting 1 section(s)" -> "draft" (non-stage steps pass through). */
+function stepLabel(task: TaskSummary): { text: string; className: string } {
   if (task.status === "pending") {
-    return (
-      <span className="border border-hairline bg-field px-1.5 py-0.5 font-mono text-[10px] tracking-[0.08em] text-wait">
-        QUEUED · {task.queuePosition ?? "—"}
-      </span>
-    );
+    return { text: "queued", className: "text-wait" };
   }
+  const stage = task.current_step.split(":")[0].trim();
   if (task.status === "failed") {
-    return (
-      <span className="font-mono text-[11px] text-err">failed</span>
-    );
+    return { text: "failed", className: "text-err" };
   }
   if (task.status === "completed") {
-    return <span className="font-mono text-[11px] text-dim">complete</span>;
+    return { text: "complete", className: "" };
   }
-  const current = task.stages.find((s) => s.state === "current");
-  return (
-    <span className="font-mono text-[11px] text-dim">
-      {current?.name.toLowerCase() ?? "…"}
-    </span>
-  );
+  return { text: stage, className: "" };
 }
 
 export function TaskList({
   tasks,
   selectedId,
   onSelect,
+  onDelete,
 }: {
-  tasks: SampleTask[];
-  selectedId: string;
+  tasks: TaskSummary[];
+  selectedId: string | null;
   onSelect: (id: string) => void;
+  onDelete: (id: string) => void;
 }) {
+  const pendingIds = tasks.filter((t) => t.status === "pending");
   return (
     <div className="flex min-w-0 flex-col">
       {tasks.map((task, i) => {
         const selected = task.id === selectedId;
+        const label = stepLabel(task);
+        const queuePos =
+          task.status === "pending"
+            ? pendingIds.findIndex((t) => t.id === task.id) + 1
+            : null;
         return (
-          <button
+          <div
             key={task.id}
-            type="button"
-            onClick={() => onSelect(task.id)}
+            role="button"
+            tabIndex={0}
             aria-current={selected ? "true" : undefined}
+            onClick={() => onSelect(task.id)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSelect(task.id);
+              }
+            }}
             style={{ animationDelay: `${i * 30}ms` }}
             className={cx(
-              "grid animate-fade-up items-center gap-x-3 border-b border-hairline px-4 py-3 text-left",
-              // full 5-col grid at >=480px; below that the id/step cells
+              "grid animate-fade-up cursor-pointer items-center gap-x-3 border-b border-hairline px-4 py-3",
+              // full 6-col grid at >=480px; below that the id/step cells
               // hide so the topic (the one thing that matters in a row)
               // keeps its space on small screens
-              "grid-cols-[12px_minmax(0,1fr)_auto]",
-              "min-[480px]:grid-cols-[12px_minmax(0,1fr)_auto_auto_auto]",
+              "grid-cols-[12px_minmax(0,1fr)_auto_auto]",
+              "min-[480px]:grid-cols-[12px_minmax(0,1fr)_auto_auto_auto_auto]",
               selected
                 ? "bg-raised shadow-[inset_2px_0_0_var(--accent)]"
                 : "hover:bg-surface",
@@ -79,13 +86,34 @@ export function TaskList({
             <span className="hidden font-mono text-[11px] text-dim min-[480px]:inline">
               {task.id.slice(0, 8)}
             </span>
-            <span className="hidden min-[480px]:block">
-              <StepLabel task={task} />
+            <span
+              className={cx(
+                "hidden font-mono text-[11px] text-dim min-[480px]:block",
+                label.className,
+              )}
+            >
+              {label.text}
+              {queuePos !== null && <span className="text-wait"> · {queuePos}</span>}
             </span>
             <span className="justify-self-end font-mono text-[11px] text-dim">
-              {task.elapsed}
+              {task.status === "pending"
+                ? "00:00"
+                : fmtElapsed(task.started_at, task.finished_at)}
             </span>
-          </button>
+            {task.status !== "running" && (
+              <button
+                type="button"
+                aria-label={`Delete task: ${task.topic}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(task.id);
+                }}
+                className="justify-self-end px-1 font-mono text-[11px] text-dim hover:text-err"
+              >
+                ×
+              </button>
+            )}
+          </div>
         );
       })}
     </div>
