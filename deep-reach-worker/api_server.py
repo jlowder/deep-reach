@@ -20,8 +20,17 @@ Routes:
     GET  /research/{id}          -> 200 full record / 404 unknown task
     GET  /research/{id}/report   -> raw canonical ResearchReport JSON
                                  (200 only when completed; 409 otherwise)
+    POST /documents              stage PDF files for the next research
+                                 task -> 201 {documents, rejected}
+                                 (400 when everything is rejected)
+    GET  /documents              -> 200 {staged, on_disk, indexed}
+    DELETE /documents            -> 200 {removed} (clears the staging area)
     GET  /health                 -> {service, running, pending,
                                      deep_configured}
+
+Staged documents (POST /documents) are attached to the next created
+research task, ingested into the vector store at task start, and removed
+from disk again when the task exits.
 
 Run with:  python api_server.py
 Environment:  PORT (default 8321), HOST (default 0.0.0.0)
@@ -36,12 +45,18 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 import deep_research_orchestrator
+from qdrant_vector_database.vector_store import (
+    DEFAULT_DOCS_DIR,
+    get_indexed_document_catalog,
+    ingest_documents,
+    reconcile_corpus,
+)
 from utils.config import get_config
 
 SERVICE_NAME = "multi-agent-rag-researcher"
@@ -59,6 +74,18 @@ STAGE_NAMES = {
 def stage_name(stage: int) -> str:
     """Human-readable name for a pipeline stage number (unknown -> "stage N")."""
     return STAGE_NAMES.get(stage, f"stage {stage}")
+
+
+def _sanitize_pdf_name(filename: Optional[str]) -> str:
+    """Upload filename -> safe staged name: basename, every character
+    outside [A-Za-z0-9._-] replaced with '_', case preserved, and a
+    lowercase .pdf extension appended (ingest globs *.pdf). Names that
+    sanitize to nothing become 'document.pdf'."""
+    base = os.path.basename(filename or "")
+    stem, _ext = os.path.splitext(base)
+    stem = "".join(c if (c.isascii() and c.isalnum() or c in "._-") else "_" for c in stem)
+    stem = stem.strip("._") or "document"
+    return f"{stem}.pdf"
 
 
 @dataclass
@@ -80,6 +107,9 @@ class TaskRecord:
     max_rounds: int = 3
     budget_doc: int = 10
     budget_web: int = 5
+    # Staged RAG documents attached at creation time; ingested at task
+    # start, removed from disk on task exit (see the /documents routes).
+    documents: list = field(default_factory=list)
 
 
 def promote_next_pending(
@@ -164,6 +194,9 @@ def create_app(
     tasks: dict[str, TaskRecord] = {}
     lock = threading.Lock()
     fn = run_fn if run_fn is not None else default_run_fn
+    # Staged RAG documents (filename -> None, ordered by upload) awaiting
+    # attachment to the next created research task. Guarded by `lock`.
+    staged_documents: dict[str, None] = {}
 
     def record_step(record: TaskRecord, stage: str, detail: str) -> None:
         """Append a step and advance current_step. Exception-guarded: a bad
@@ -189,12 +222,45 @@ def create_app(
                 record.error = error
             return True
 
+    def _index_documents(record: TaskRecord) -> None:
+        """Ingest the task's staged documents (runs in the task thread, so
+        the cost counts against the run's wall-clock budget). The collection
+        is rebuilt from the docs dir — cost grows with corpus size, which is
+        why this runs once per task start, not per request. A failure never
+        kills the task: the pipeline tolerates an empty collection
+        (web-only mode), so just record it and continue."""
+        record_step(
+            record, "documents", f"indexing {len(record.documents)} document(s)"
+        )
+        try:
+            reconcile_corpus(DEFAULT_DOCS_DIR)
+            ingest_documents(DEFAULT_DOCS_DIR)
+        except Exception:
+            record_step(
+                record, "documents", "indexing failed — continuing without local docs"
+            )
+
+    def _remove_documents(record: TaskRecord) -> None:
+        """Remove the task's documents after the run (both terminal states;
+        a watchdog zombie thread also reaches this eventually) and
+        reconcile the collection against what remains on disk. Idempotent by
+        construction; a failure only records a step."""
+        try:
+            for name in record.documents:
+                (DEFAULT_DOCS_DIR / name).unlink(missing_ok=True)
+            reconcile_corpus(DEFAULT_DOCS_DIR)
+        except Exception:
+            record_step(record, "documents", "cleanup failed — stale docs may remain")
+
     def _worker(
         record: TaskRecord, fn: Callable[..., dict], topic: str, budgets: dict
     ) -> None:
-        """Daemon-thread body: run fn, store artifacts, finalize the record,
-        then pump the queue (the run_fn thread has returned, so the
-        pipeline's process lock is free again)."""
+        """Daemon-thread body: index the task's documents, run fn, store
+        artifacts, finalize the record, clean the documents up, then pump
+        the queue (the run_fn thread has returned, so the pipeline's
+        process lock is free again)."""
+        if record.documents:
+            _index_documents(record)
         error: Optional[str] = None
         result: Any = None
         try:
@@ -223,6 +289,8 @@ def create_app(
             _finalize(record, "completed")
         else:
             _finalize(record, "failed", error=error)
+        if record.documents:
+            _remove_documents(record)
         # The run has truly stopped — whether we won the race against the
         # watchdog or we are a zombie it already marked failed — so the
         # pipeline lock is released and the queue may advance: start the
@@ -284,7 +352,96 @@ def create_app(
             "started_at": t.started_at,
             "finished_at": t.finished_at,
             "error": t.error,
+            "documents": t.documents,
         }
+
+    @app.post("/documents")
+    def upload_documents(files: list[UploadFile] = File(...)):
+        """Stage PDF files (multipart field `files`, multiple allowed) for
+        the next research task. Each upload must start with the %PDF magic
+        bytes; the basename is sanitized and deduped (-2/-3 suffix, case
+        insensitive) against what is already on disk / staged, then the
+        file is saved into the docs dir. Ingestion into the vector store
+        happens at TASK START (it rebuilds the collection from the docs
+        dir — cost grows with the corpus), not here. 201 when anything is
+        accepted, 400 when everything is rejected."""
+        accepted: list[str] = []
+        rejected: dict[str, str] = {}
+        DEFAULT_DOCS_DIR.mkdir(parents=True, exist_ok=True)
+        for upload in files:
+            display = os.path.basename(upload.filename or "") or "upload"
+            try:
+                contents = upload.file.read()
+            except Exception:
+                rejected[display] = "could not read upload"
+                continue
+            if contents[:4] != b"%PDF":
+                rejected[display] = "not a PDF (missing %PDF magic bytes)"
+                continue
+            with lock:
+                taken = {
+                    n.lower() for n in staged_documents
+                } | {p.name.lower() for p in DEFAULT_DOCS_DIR.glob("*.pdf")}
+                base = _sanitize_pdf_name(upload.filename)
+                stem = base[: -len(".pdf")]
+                name = base
+                counter = 2
+                while name.lower() in taken:
+                    name = f"{stem}-{counter}.pdf"
+                    counter += 1
+                (DEFAULT_DOCS_DIR / name).write_bytes(contents)
+                staged_documents[name] = None
+                accepted.append(name)
+        return JSONResponse(
+            status_code=201 if accepted else 400,
+            content={"documents": accepted, "rejected": rejected},
+        )
+
+    @app.get("/documents")
+    def list_documents():
+        """Staged / on-disk / indexed documents. All best-effort: any error
+        yields an empty list, never a 5xx."""
+        with lock:
+            staged = list(staged_documents)
+        try:
+            on_disk = (
+                sorted(p.name for p in DEFAULT_DOCS_DIR.glob("*.pdf"))
+                if DEFAULT_DOCS_DIR.exists()
+                else []
+            )
+        except OSError:
+            on_disk = []
+        try:
+            indexed = [
+                d.get("document_name")
+                for d in get_indexed_document_catalog()
+                if d.get("document_name")
+            ]
+        except Exception:
+            indexed = []
+        return {"staged": staged, "on_disk": on_disk, "indexed": indexed}
+
+    @app.delete("/documents")
+    def clear_documents():
+        """Remove every staged document: files off disk, registry cleared,
+        and the vector store reconciled (purges the vanished files' chunks
+        so they cannot pollute later retrieval). Best-effort: errors are
+        swallowed, never a 5xx."""
+        with lock:
+            names = list(staged_documents)
+            staged_documents.clear()
+        removed = []
+        for name in names:
+            try:
+                (DEFAULT_DOCS_DIR / name).unlink(missing_ok=True)
+            except OSError:
+                continue
+            removed.append(name)
+        try:
+            reconcile_corpus(DEFAULT_DOCS_DIR)
+        except Exception:
+            pass
+        return {"removed": removed}
 
     @app.post("/research", status_code=202)
     def start_research(req: ResearchRequest):
@@ -301,6 +458,11 @@ def create_app(
                 # Queue it (FIFO): no thread yet. The pump promotes it to
                 # "running" when the pipeline becomes free.
                 record.status = "pending"
+            # Attach whatever is staged to this task (and only this task),
+            # then clear the staging area for the next request.
+            if staged_documents:
+                record.documents = list(staged_documents)
+                staged_documents.clear()
             # Pipeline free: keep the "running" default; start below.
             tasks[record.id] = record
         if not busy:
@@ -310,6 +472,7 @@ def create_app(
             "task_id": record.id,
             "status": record.status,
             "current_step": record.current_step,
+            "documents": record.documents,
             "links": {
                 "status": f"/research/{record.id}",
                 "report": f"/research/{record.id}/report",
@@ -337,6 +500,7 @@ def create_app(
                 "steps": list(t.steps),
                 "started_at": t.started_at,
                 "finished_at": t.finished_at,
+                "documents": list(t.documents),
             }
             if t.error is not None:
                 body["error"] = t.error
