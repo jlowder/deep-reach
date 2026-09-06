@@ -18,6 +18,9 @@ Routes:
                                  free, "pending" when busy; FIFO queue)
     GET  /research               -> 200 {tasks: [summaries]}
     GET  /research/{id}          -> 200 full record / 404 unknown task
+    DELETE /research/{id}        -> 200 {deleted, documents} / 409 running /
+                                    404 unknown task (removes the record +
+                                    cleans up its documents)
     GET  /research/{id}/report   -> raw canonical ResearchReport JSON
                                  (200 only when completed; 409 otherwise)
     POST /documents              stage PDF files for the next research
@@ -30,7 +33,7 @@ Routes:
 
 Staged documents (POST /documents) are attached to the next created
 research task, ingested into the vector store at task start, and removed
-from disk again when the task exits.
+from disk again when the task exits — or when the task is deleted.
 
 Run with:  python api_server.py
 Environment:  PORT (default 8321), HOST (default 0.0.0.0)
@@ -240,11 +243,15 @@ def create_app(
                 record, "documents", "indexing failed — continuing without local docs"
             )
 
-    def _remove_documents(record: TaskRecord) -> None:
-        """Remove the task's documents after the run (both terminal states;
-        a watchdog zombie thread also reaches this eventually) and
-        reconcile the collection against what remains on disk. Idempotent by
-        construction; a failure only records a step."""
+    def _cleanup_documents(record: TaskRecord) -> None:
+        """Remove the task's documents from disk and reconcile the
+        collection against what remains. Called from the worker on task
+        exit (both terminal states; a watchdog zombie thread also reaches
+        it eventually) and from DELETE /research/{id} for a deleted record
+        (a pending task's staged files were never ingested — removing them
+        plus purging their points keeps the next run's corpus clean).
+        Idempotent (unlink missing_ok + reconcile); a failure only records
+        a step."""
         try:
             for name in record.documents:
                 (DEFAULT_DOCS_DIR / name).unlink(missing_ok=True)
@@ -290,7 +297,7 @@ def create_app(
         else:
             _finalize(record, "failed", error=error)
         if record.documents:
-            _remove_documents(record)
+            _cleanup_documents(record)
         # The run has truly stopped — whether we won the race against the
         # watchdog or we are a zombie it already marked failed — so the
         # pipeline lock is released and the queue may advance: start the
@@ -507,6 +514,35 @@ def create_app(
             if t.stats is not None:
                 body["stats"] = t.stats
         return body
+
+    @app.delete("/research/{task_id}")
+    def delete_research(task_id: str):
+        """Remove a task record from the in-memory store. A running task
+        cannot be deleted (409): Python threads cannot be killed, so its
+        worker is left to finish — its exit-cleanup then runs as usual.
+        Pending and terminal records are popped (200); a deleted record's
+        documents are cleaned up (files off disk + reconcile, idempotent)
+        so a deleted pending task's staged files cannot leak into later
+        runs."""
+        with lock:
+            record = tasks.get(task_id)
+            if record is None:
+                return JSONResponse(
+                    status_code=404, content={"error": f"unknown task: {task_id}"}
+                )
+            if record.status == "running":
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": "cannot delete a running task",
+                        "task_id": task_id,
+                    },
+                )
+            del tasks[task_id]
+            docs = list(record.documents)
+        if docs:
+            _cleanup_documents(record)
+        return {"deleted": task_id, "documents": docs}
 
     @app.get("/research/{task_id}/report")
     def get_report(task_id: str):
