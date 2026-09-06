@@ -95,16 +95,33 @@ def client():
     return TestClient(api_server.create_app(run_fn=_make_fake_run_fn()))
 
 
+TERMINAL = {"completed", "failed"}
+
+
 def _wait(client: TestClient, task_id: str, timeout: float = 10.0) -> dict:
-    """Poll GET /research/{id} until the task leaves 'running'."""
+    """Poll GET /research/{id} until the task reaches a terminal state
+    (completed/failed). Also covers "pending" queue tasks, which the pump
+    auto-starts when the pipeline frees up."""
     deadline = time.time() + timeout
     last = None
     while time.time() < deadline:
         last = client.get(f"/research/{task_id}").json()
-        if last["status"] != "running":
+        if last["status"] in TERMINAL:
             return last
         time.sleep(0.05)
-    raise AssertionError(f"task {task_id} still running after {timeout}s")
+    stuck = last["status"] if last else "?"
+    raise AssertionError(f"task {task_id} still {stuck} after {timeout}s")
+
+
+def _wait_for(predicate, timeout: float = 5.0) -> None:
+    """Poll until a condition holds — worker threads are async, so tests
+    must not race against them (e.g. the first run_fn call landing)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return
+        time.sleep(0.02)
+    raise AssertionError("condition not met in time")
 
 
 # ---------------------------------------------------------------------------
@@ -156,10 +173,15 @@ def test_budgets_forwarded_to_run_fn():
     }
 
 
-def test_second_post_while_running_is_409():
+def test_second_post_while_running_is_queued_pending():
+    """New contract (was: 409 while busy): a POST accepted while a run is
+    in progress is queued with 202 as status "pending", starts no second
+    run_fn, lists as pending, 409s on /report, and is auto-started by the
+    pump when the first run completes."""
     release = threading.Event()
 
     def run_fn(topic, **kwargs):
+        run_fn.calls.append(topic)
         release.wait(timeout=10)
         return {
             "final_answer": f"done {topic}",
@@ -167,18 +189,40 @@ def test_second_post_while_running_is_409():
             "stats": {"llm_calls": 1},
         }
 
+    run_fn.calls = []
     client = TestClient(api_server.create_app(run_fn=run_fn))
     first = client.post("/research", json={"topic": "one"}).json()["task_id"]
     resp = client.post("/research", json={"topic": "two"})
-    assert resp.status_code == 409
-    assert resp.json() == {
-        "error": "a research run is already in progress",
-        "running_task_id": first,
+    assert resp.status_code == 202
+    body = resp.json()
+    second = body["task_id"]
+    assert body["status"] == "pending"
+    assert body["current_step"] == "queued"
+    assert body["links"] == {
+        "status": f"/research/{second}",
+        "report": f"/research/{second}/report",
     }
+    listed = client.get("/research").json()["tasks"]
+    assert [t["id"] for t in listed] == [first, second]
+    assert [t["status"] for t in listed] == ["running", "pending"]
+    # The queued task has started no run_fn yet.
+    _wait_for(lambda: run_fn.calls == ["one"])
+    assert run_fn.calls == ["one"]
+    assert client.get(f"/research/{second}/report").json() == {"status": "pending"}
     release.set()
     _wait(client, first)
-    # Once the run finishes, a new run is accepted again.
-    assert client.post("/research", json={"topic": "three"}).status_code == 202
+    # Completion pump: the queued task auto-starts, no new POST needed.
+    _wait(client, second)
+    assert run_fn.calls == ["one", "two"]
+    # The queue has drained; once free, a fresh run is accepted again
+    # (always 202, never 409) and runs to completion.
+    listed = {t["status"] for t in client.get("/research").json()["tasks"]}
+    assert listed == {"completed"}
+    assert client.get("/health").json()["pending"] == 0
+    fresh = client.post("/research", json={"topic": "three"})
+    assert fresh.status_code == 202
+    _wait(client, fresh.json()["task_id"])
+    assert run_fn.calls == ["one", "two", "three"]
 
 
 def test_run_failure_is_recorded():
@@ -192,6 +236,190 @@ def test_run_failure_is_recorded():
     assert "boom: simulated failure" in last["error"]
     assert "stats" not in last
     assert client.get(f"/research/{task_id}/report").status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# Pending queue (FIFO pump)
+# ---------------------------------------------------------------------------
+
+
+def _quick_run_fn(result_for=None):
+    """run_fn that sleeps 0.2 s then returns (or raises for a given topic)."""
+
+    def run_fn(topic, **kwargs):
+        time.sleep(0.2)
+        if result_for is not None and topic in result_for:
+            raise RuntimeError(result_for[topic])
+        return {
+            "final_answer": f"done {topic}",
+            "state": {"report_json": _fake_report_json(topic)},
+            "stats": {"llm_calls": 1},
+        }
+
+    return run_fn
+
+
+def test_pump_auto_starts_pending_on_completion():
+    """On completion the pump starts the oldest pending task without any
+    further POST; the queued task reaches completed on its own."""
+    client = TestClient(
+        api_server.create_app(run_fn=_quick_run_fn(), max_run_seconds=5)
+    )
+    a = client.post("/research", json={"topic": "a"}).json()["task_id"]
+    time.sleep(0.1)  # let a's run start so b queues behind it
+    b = client.post("/research", json={"topic": "b"})
+    assert b.status_code == 202
+    assert b.json()["status"] == "pending"
+    b_id = b.json()["task_id"]
+    _wait(client, a)
+    last_b = _wait(client, b_id)  # no second POST
+    assert last_b["status"] == "completed"
+    listed = {t["topic"]: t["status"] for t in client.get("/research").json()["tasks"]}
+    assert listed == {"a": "completed", "b": "completed"}
+    assert client.get("/health").json()["pending"] == 0
+
+
+def test_queue_is_fifo():
+    """Three queued tasks start strictly in POST (oldest-first) order."""
+    started = []
+    started_lock = threading.Lock()
+
+    def run_fn(topic, **kwargs):
+        with started_lock:
+            started.append(topic)
+        time.sleep(0.15)
+        return {
+            "final_answer": f"done {topic}",
+            "state": {"report_json": _fake_report_json(topic)},
+            "stats": {"llm_calls": 1},
+        }
+
+    client = TestClient(api_server.create_app(run_fn=run_fn, max_run_seconds=5))
+    first = client.post("/research", json={"topic": "first"}).json()["task_id"]
+    time.sleep(0.05)
+    second = client.post("/research", json={"topic": "second"})
+    third = client.post("/research", json={"topic": "third"})
+    assert second.json()["status"] == "pending"
+    assert third.json()["status"] == "pending"
+    _wait(client, first)
+    _wait(client, second.json()["task_id"])
+    _wait(client, third.json()["task_id"])
+    assert started == ["first", "second", "third"]
+
+
+def test_failed_run_pumps_next_pending():
+    """A failed run (run_fn raised) frees the pipeline just like a
+    completed one: the pump starts the next queued task."""
+    client = TestClient(
+        api_server.create_app(
+            run_fn=_quick_run_fn(result_for={"boom": "kaboom"}),
+            max_run_seconds=5,
+        )
+    )
+    a = client.post("/research", json={"topic": "boom"}).json()["task_id"]
+    time.sleep(0.1)
+    b = client.post("/research", json={"topic": "ok"})
+    assert b.json()["status"] == "pending"
+    b_id = b.json()["task_id"]
+    last_a = _wait(client, a)
+    assert last_a["status"] == "failed"
+    assert "kaboom" in last_a["error"]
+    last_b = _wait(client, b_id)
+    assert last_b["status"] == "completed"
+
+
+def test_watchdog_killed_zombie_releases_queue_only_when_it_stops():
+    """Zombie: the watchdog fails a run whose run_fn is still executing
+    (in the real pipeline it keeps holding the process lock). The pump
+    must NOT advance when the watchdog fires — only when the zombie's
+    run_fn has truly returned and the pipeline is free."""
+    started = {}
+
+    def run_fn(topic, **kwargs):
+        started[topic] = time.time()
+        # "a" is the zombie (1 s, over the 0.3 s watchdog); "b" is short so
+        # its OWN watchdog does not fire once the pump starts it.
+        time.sleep(1.0 if topic == "a" else 0.1)
+        return {
+            "final_answer": f"done {topic}",
+            "state": {"report_json": _fake_report_json(topic)},
+            "stats": {"llm_calls": 1},
+        }
+
+    client = TestClient(api_server.create_app(run_fn=run_fn, max_run_seconds=0.3))
+    a = client.post("/research", json={"topic": "a"}).json()["task_id"]
+    time.sleep(0.05)
+    b = client.post("/research", json={"topic": "b"}).json()
+    assert b["status"] == "pending"
+    b_id = b["task_id"]
+    # t ≈ 0.45: the watchdog has marked a failed, but its run_fn (the
+    # zombie) is still executing — the queue must not have advanced yet.
+    time.sleep(0.4)
+    assert client.get(f"/research/{a}").json()["status"] == "failed"
+    assert client.get(f"/research/{b_id}").json()["status"] == "pending"
+    # t ≈ 1.0: the zombie's run_fn returns; only now does the pump start b.
+    last_b = _wait(client, b_id, timeout=5)
+    assert last_b["status"] == "completed"
+    assert started["b"] - started["a"] >= 0.5
+
+
+def test_health_reports_pending_count():
+    release = threading.Event()
+
+    def run_fn(topic, **kwargs):
+        release.wait(timeout=10)
+        return {
+            "final_answer": f"done {topic}",
+            "state": {"report_json": _fake_report_json(topic)},
+            "stats": {"llm_calls": 1},
+        }
+
+    client = TestClient(api_server.create_app(run_fn=run_fn))
+    assert client.get("/health").json()["pending"] == 0
+    ids = [
+        client.post("/research", json={"topic": t}).json()["task_id"]
+        for t in ("one", "two", "three")
+    ]
+    body = client.get("/health").json()
+    assert body["running"] is True
+    assert body["pending"] == 2
+    release.set()
+    for task_id in ids:
+        _wait(client, task_id)
+    body = client.get("/health").json()
+    assert body["running"] is False
+    assert body["pending"] == 0
+
+
+def test_promote_next_pending_is_fifo_and_idempotent():
+    """Unit test of the pump: while anything is running it promotes
+    nothing; racing concurrent pumps promote the oldest pending record
+    exactly once (a task can never be started twice)."""
+    lock = threading.Lock()
+    a = api_server.TaskRecord(id="a", topic="a")  # running
+    p1 = api_server.TaskRecord(id="p1", topic="p1", status="pending")
+    p2 = api_server.TaskRecord(id="p2", topic="p2", status="pending")
+    tasks = {"a": a, "p1": p1, "p2": p2}
+    assert api_server.promote_next_pending(tasks, lock) is None
+    a.status = "completed"
+    results = []
+    barrier = threading.Barrier(4)
+
+    def pump():
+        barrier.wait()
+        results.append(api_server.promote_next_pending(tasks, lock))
+
+    threads = [threading.Thread(target=pump) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    winners = [r for r in results if r is not None]
+    assert len(winners) == 1
+    assert winners[0].id == "p1"  # FIFO: oldest pending first
+    assert p1.status == "running"
+    assert p2.status == "pending"
+    assert api_server.promote_next_pending(tasks, lock) is None  # p1 running
 
 
 # ---------------------------------------------------------------------------
