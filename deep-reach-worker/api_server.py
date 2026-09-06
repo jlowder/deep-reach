@@ -3,19 +3,25 @@ FastAPI service exposing the 5-stage deep-research pipeline.
 
 deep_research() is synchronous and process-serialized (internal lock: one
 deep run at a time), so the service runs each research job on a daemon
-thread, tracks its lifecycle (running -> completed / failed) in an
-in-memory task store, records per-stage / per-section progress from the
+thread, tracks its lifecycle (pending -> running -> completed / failed) in
+an in-memory task store, records per-stage / per-section progress from the
 pipeline's on_stage / on_section callbacks, and enforces a wall-clock
 deadline via a per-task watchdog thread.
 
+Runs are serialized: at most one task executes at a time. A POST accepted
+while a run is in progress is queued (status "pending") and a FIFO pump
+starts the oldest pending task when the pipeline becomes free.
+
 Routes:
-    POST /research               start a run -> 202 {task_id, links}
-                                 (409 while another run is in progress)
+    POST /research               start or queue a run -> 202 {task_id, links}
+                                 (status "running" when the pipeline is
+                                 free, "pending" when busy; FIFO queue)
     GET  /research               -> 200 {tasks: [summaries]}
     GET  /research/{id}          -> 200 full record / 404 unknown task
     GET  /research/{id}/report   -> raw canonical ResearchReport JSON
                                  (200 only when completed; 409 otherwise)
-    GET  /health                 -> {service, running, deep_configured}
+    GET  /health                 -> {service, running, pending,
+                                     deep_configured}
 
 Run with:  python api_server.py
 Environment:  PORT (default 8321), HOST (default 0.0.0.0)
@@ -61,7 +67,7 @@ class TaskRecord:
 
     id: str
     topic: str
-    status: str = "running"  # "running" | "completed" | "failed"
+    status: str = "running"  # "pending" | "running" | "completed" | "failed"
     current_step: str = "queued"
     steps: list = field(default_factory=list)  # [{stage: str, detail: str, ts: float}]
     started_at: float = field(default_factory=time.time)
@@ -69,6 +75,11 @@ class TaskRecord:
     error: Optional[str] = None
     stats: Optional[dict] = None
     report_json: Optional[str] = None
+    # Requested budgets, kept on the record so the queue pump can rebuild
+    # the run args when it promotes this record to "running".
+    max_rounds: int = 3
+    budget_doc: int = 10
+    budget_web: int = 5
 
 
 class ResearchRequest(BaseModel):
@@ -129,6 +140,7 @@ def create_app(
 
     tasks: dict[str, TaskRecord] = {}
     lock = threading.Lock()
+    fn = run_fn if run_fn is not None else default_run_fn
 
     def record_step(record: TaskRecord, stage: str, detail: str) -> None:
         """Append a step and advance current_step. Exception-guarded: a bad
@@ -164,16 +176,24 @@ def create_app(
             result = fn(topic, **budgets)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-        if result is not None:
-            if not isinstance(result, dict):
-                error = f"run_fn returned {type(result).__name__}, expected dict"
-            else:
-                state = result.get("state") or {}
-                report_json = state.get("report_json")
-                with lock:
-                    record.stats = result.get("stats")
-                    if isinstance(report_json, str):
-                        record.report_json = report_json
+        try:
+            if result is not None:
+                if not isinstance(result, dict):
+                    error = f"run_fn returned {type(result).__name__}, expected dict"
+                else:
+                    state = result.get("state") or {}
+                    report_json = state.get("report_json")
+                    with lock:
+                        record.stats = result.get("stats")
+                        if isinstance(report_json, str):
+                            record.report_json = report_json
+        except Exception as exc:
+            # Artifact storage must never wedge the task/queue: record the
+            # failure instead of leaving the record stuck "running".
+            if error is None:
+                error = (
+                    f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+                )
         if error is None:
             _finalize(record, "completed")
         else:
@@ -181,7 +201,37 @@ def create_app(
 
     def _watchdog(record: TaskRecord) -> None:
         time.sleep(max_run_seconds)
+        # Marks the run failed but does NOT pump: the run_fn thread may still
+        # be executing (a zombie holding the pipeline lock). The pump runs
+        # from _worker, i.e. when the run has truly stopped.
         _finalize(record, "failed", error=f"timed out after {max_run_seconds:g}s")
+
+    def _budgets(record: TaskRecord) -> dict:
+        """Run args for a record: its requested budgets plus the progress
+        callbacks bound to it. (record_step appends to steps + advances
+        current_step, exception-guarded; raw pipeline detail strings are
+        kept verbatim.)"""
+        return {
+            "max_rounds": record.max_rounds,
+            "budget_doc": record.budget_doc,
+            "budget_web": record.budget_web,
+            "on_stage": lambda n, d: record_step(record, stage_name(n), d),
+            "on_section": lambda i, t, h, s, p: record_step(
+                record, f"section {i}/{t}", h
+            ),
+        }
+
+    def _start_task(
+        record: TaskRecord, run: Callable[..., dict], topic: str, budgets: dict
+    ) -> None:
+        """Spawn the worker + watchdog threads for a record that is
+        "running". Caller must not hold `lock`; the record's status and
+        started_at are set beforehand (under lock) by the caller. Used by
+        POST (pipeline free) and by the queue pump."""
+        threading.Thread(
+            target=_worker, args=(record, run, topic, budgets), daemon=True
+        ).start()
+        threading.Thread(target=_watchdog, args=(record,), daemon=True).start()
 
     def _summary(t: TaskRecord) -> dict:
         return {
@@ -198,36 +248,22 @@ def create_app(
     @app.post("/research", status_code=202)
     def start_research(req: ResearchRequest):
         with lock:
-            for t in tasks.values():
-                if t.status == "running":
-                    return JSONResponse(
-                        status_code=409,
-                        content={
-                            "error": "a research run is already in progress",
-                            "running_task_id": t.id,
-                        },
-                    )
-            record = TaskRecord(id=uuid.uuid4().hex, topic=req.topic)
+            busy = any(t.status == "running" for t in tasks.values())
+            record = TaskRecord(
+                id=uuid.uuid4().hex,
+                topic=req.topic,
+                max_rounds=req.max_rounds,
+                budget_doc=req.budget_doc,
+                budget_web=req.budget_web,
+            )
+            if busy:
+                # Queue it (FIFO): no thread yet. The pump promotes it to
+                # "running" when the pipeline becomes free.
+                record.status = "pending"
+            # Pipeline free: keep the "running" default; start below.
             tasks[record.id] = record
-
-        budgets = {
-            "max_rounds": req.max_rounds,
-            "budget_doc": req.budget_doc,
-            "budget_web": req.budget_web,
-            # Progress callbacks: record_step appends to steps + advances
-            # current_step (exception-guarded, see record_step). Raw detail
-            # strings from the pipeline are kept verbatim.
-            "on_stage": lambda n, d: record_step(record, stage_name(n), d),
-            "on_section": lambda i, t, h, s, p: record_step(
-                record, f"section {i}/{t}", h
-            ),
-        }
-        fn = run_fn if run_fn is not None else default_run_fn
-
-        threading.Thread(
-            target=_worker, args=(record, fn, req.topic, budgets), daemon=True
-        ).start()
-        threading.Thread(target=_watchdog, args=(record,), daemon=True).start()
+        if not busy:
+            _start_task(record, fn, req.topic, _budgets(record))
 
         return {
             "task_id": record.id,
@@ -284,6 +320,7 @@ def create_app(
     def health():
         with lock:
             running = any(t.status == "running" for t in tasks.values())
+            pending = sum(1 for t in tasks.values() if t.status == "pending")
         try:
             cfg = get_config()
             deep_configured = bool(
@@ -295,6 +332,7 @@ def create_app(
         return {
             "service": SERVICE_NAME,
             "running": running,
+            "pending": pending,
             "deep_configured": deep_configured,
         }
 
