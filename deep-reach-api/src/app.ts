@@ -260,7 +260,7 @@ async function getDownload(req: Request, id: string): Promise<Response> {
     if (status === 404) return jsonResponse({ error: "not found" }, 404);
     if (status < 200 || status >= 300) return jsonResponse(data, status); // transient upstream error: passthrough
     const st = asRecord(data)?.status;
-    if (st === "running" || st === "queued") {
+    if (st === "running" || st === "queued" || st === "pending") {
       return jsonResponse({ status: st, task_id: id }, 409);
     }
     if (st === "failed") {
