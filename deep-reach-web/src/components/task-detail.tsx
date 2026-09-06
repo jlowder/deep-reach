@@ -64,12 +64,17 @@ export function TaskDetail({ task }: { task: SampleTask }) {
       </p>
 
       {task.status === "running" && task.ticker && (
-        <p aria-live="polite" className="font-mono text-[12px] text-dim">
+        <p
+          aria-live="polite"
+          className="max-w-[720px] font-mono text-[12px] text-dim"
+        >
           {task.ticker}
         </p>
       )}
 
-      <PipelineStrip stages={task.stages} dim={task.status === "pending"} />
+      <div className="max-w-[720px]">
+        <PipelineStrip stages={task.stages} dim={task.status === "pending"} />
+      </div>
 
       {task.status === "pending" && (
         <p className="font-mono text-[12px] text-dim">

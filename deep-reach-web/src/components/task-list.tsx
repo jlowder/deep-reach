@@ -63,7 +63,12 @@ export function TaskList({
             aria-current={selected ? "true" : undefined}
             style={{ animationDelay: `${i * 30}ms` }}
             className={cx(
-              "grid animate-fade-up grid-cols-[12px_minmax(0,1fr)_auto_auto_auto] items-center gap-x-3 border-b border-hairline px-4 py-3 text-left",
+              "grid animate-fade-up items-center gap-x-3 border-b border-hairline px-4 py-3 text-left",
+              // full 5-col grid at >=480px; below that the id/step cells
+              // hide so the topic (the one thing that matters in a row)
+              // keeps its space on small screens
+              "grid-cols-[12px_minmax(0,1fr)_auto]",
+              "min-[480px]:grid-cols-[12px_minmax(0,1fr)_auto_auto_auto]",
               selected
                 ? "bg-raised shadow-[inset_2px_0_0_var(--accent)]"
                 : "hover:bg-surface",
@@ -71,10 +76,12 @@ export function TaskList({
           >
             <Lamp status={task.status} />
             <span className="truncate text-[13px]">{task.topic}</span>
-            <span className="font-mono text-[11px] text-dim">
+            <span className="hidden font-mono text-[11px] text-dim min-[480px]:inline">
               {task.id.slice(0, 8)}
             </span>
-            <StepLabel task={task} />
+            <span className="hidden min-[480px]:block">
+              <StepLabel task={task} />
+            </span>
             <span className="justify-self-end font-mono text-[11px] text-dim">
               {task.elapsed}
             </span>
