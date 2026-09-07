@@ -8,7 +8,13 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
 import { cx } from "@/lib/cx";
 import { fmtClock, fmtElapsed } from "@/lib/format";
-import { STAGE_NAMES, deriveStageStates, type StripStage } from "@/lib/stages";
+import {
+  STAGE_KEYS,
+  STAGE_NAMES,
+  deriveStageStates,
+  normalizeStage,
+  type StripStage,
+} from "@/lib/stages";
 import type { Task, TaskStatus, TaskStep, TaskSummary } from "@/lib/types";
 import { PipelineStrip } from "./pipeline-strip";
 
@@ -257,7 +263,9 @@ function StepLog({
 // The detail pane usually renders from the full record via
 // deriveStageStates (lib/stages.ts). This fallback covers the brief window
 // where only the list summary has arrived (summaries carry current_step
-// but no steps[]).
+// but no steps[]): the same locked mapping — current_step through the
+// shared normalize, earlier stages done, it current (running) / err
+// (failed), later stages todo; off-track → all todo.
 
 function placeholderStages(status: TaskStatus, currentStep: string): StripStage[] {
   if (status === "pending") {
@@ -266,14 +274,13 @@ function placeholderStages(status: TaskStatus, currentStep: string): StripStage[
   if (status === "completed") {
     return STAGE_NAMES.map((name) => ({ name, state: "done" as const }));
   }
-  const current = stageKey(currentStep);
+  const key = normalizeStage(currentStep);
+  const current = key === null ? null : STAGE_KEYS.indexOf(key);
   return STAGE_NAMES.map((name, i) => ({
     name,
     state:
-      current === -1
-        ? i === 0
-          ? "current"
-          : "todo"
+      current === null
+        ? "todo"
         : i < current
           ? "done"
           : i === current
@@ -282,11 +289,4 @@ function placeholderStages(status: TaskStatus, currentStep: string): StripStage[
               : "current"
             : "todo",
   }));
-}
-
-function stageKey(step: string): number {
-  const key = step.split(":")[0].trim().toLowerCase();
-  if (key === "section") return 2; // drafting a section
-  if (key === "documents" || key === "queued") return -1; // pre-pipeline
-  return ["decompose", "investigate", "draft", "critique", "assemble"].indexOf(key);
 }
