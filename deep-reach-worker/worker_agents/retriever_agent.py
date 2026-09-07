@@ -1,12 +1,11 @@
 import json
-import os
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 from memory import infer_route_used
 from qdrant_vector_database import get_indexed_document_catalog, similarity_search
 from .model_runner import run_model
-from tavily import TavilyClient
 from utils.config import get_config
+from utils.search import web_search
 
 """
 Retriever Agent 
@@ -20,8 +19,6 @@ search the web for up-to-date information or use both tools.
 If local document evidence is weak or missing, it can fall back to web search
 to gather broader context.
 """
-
-tavily = TavilyClient(api_key=os.getenv("TAVILY_API_KEY")) 
 
 # Structured output returned by the retriever agent.
 # extra="allow" so goal mode (P1-2) can attach the last SufficiencyReport
@@ -113,55 +110,10 @@ def retrieve_document(
         "chunks": chunks,
     }
 
-# Search the web for supporting context.
-# Maximum characters to retain per web search result content.
-# Tavily can return 3-15KB of raw HTML/Markdown per result; we cap it
-# so accumulated results across iterations stay within the context window.
-_WEB_RESULT_CONTENT_MAX_CHARS = 600
-
-
-def web_search(query: str, num_results: int = 5) -> Dict[str, Any]:
-    if tavily is None:
-        return {"query": query, "results": []}
-
-    try:
-        result = tavily.search(
-            query=query,
-            search_depth="advanced",
-            max_results=num_results,
-            include_answer=False,
-            include_raw_content=False,
-            include_images=False,
-        )
-        results = result.get("results", [])
-
-        def _whitelist_result(r: Dict[str, Any]) -> Dict[str, Any]:
-            """Keep only the citation-required fields; drop all Tavily extras."""
-            title = r.get("title")
-            url = r.get("url")
-            content = r.get("content")
-            try:
-                score = float(r.get("score"))
-            except (TypeError, ValueError):
-                score = 0.0
-            kept: Dict[str, Any] = {
-                "title": title if isinstance(title, str) else "",
-                "url": url if isinstance(url, str) else "",
-                "content": (
-                    content[:_WEB_RESULT_CONTENT_MAX_CHARS]
-                    if isinstance(content, str)
-                    else ""
-                ),
-                "score": score,
-            }
-            published = r.get("published_date")
-            if isinstance(published, str) and published:
-                kept["published_date"] = published
-            return kept
-
-        return {"query": query, "results": [_whitelist_result(r) for r in results]}
-    except Exception:
-        return {"query": query, "results": []}
+# Web search is provided by utils.search (backend selected via SEARCH_TOOL =
+# "tavily" or "searxng"; see the module-top import of web_search). It keeps
+# the same contract — {"query": str, "results": [{title, url, content (<= 600
+# chars), score, published_date?}, ...]} — and never raises.
 
 
 # ---------------------------------------------------------------------------

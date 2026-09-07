@@ -493,6 +493,10 @@ OPENAI_MODEL=gpt-5.4
 
 # Tavily Web Search API Key
 TAVILY_API_KEY=your_tavily_api_key_here
+# Web search backend: "tavily" or "searxng"
+SEARCH_TOOL=tavily
+# SearXNG base URL (used when SEARCH_TOOL=searxng)
+SEARXNG_URL=http://localhost:8081
 '''
 
 
