@@ -11,6 +11,8 @@ export const STAGE_KEYS = [
   "assemble",
 ] as const;
 
+export type StageKey = (typeof STAGE_KEYS)[number];
+
 export const STAGE_NAMES = [
   "Decompose",
   "Investigate",
@@ -27,57 +29,74 @@ export interface StripStage {
 }
 
 /**
- * Resolve one of the worker's step.stage strings to a track index:
- * the five on_stage names map 1:1; "section i/n" belongs to draft; the
- * pre-pipeline steps ("queued", "documents") are off-track (-1).
+ * Resolve a worker stage string to one of STAGE_KEYS, or null when it is
+ * off the track. Input forms: a bare step stage ("decompose", …,
+ * "section i/n") or a current_step ("<stage>: <detail>" / "queued").
+ * "section i/n" (emitted per drafted section — no colon in it, so a prefix
+ * match) belongs to draft; "documents" (indexing/cleanup), "queued" and
+ * anything unknown never light a stage.
  */
-function stageIndex(stage: string): number {
-  const key = stage.split(":")[0].trim().toLowerCase();
-  if (key === "section") return (STAGE_KEYS as readonly string[]).indexOf("draft");
-  if (key === "documents" || key === "queued" || key === "") return -1;
-  return (STAGE_KEYS as readonly string[]).indexOf(key);
+export function normalizeStage(v: string | null | undefined): StageKey | null {
+  if (!v) return null;
+  let key = v.trim().toLowerCase();
+  const colon = key.indexOf(":");
+  if (colon >= 0) key = key.slice(0, colon).trim();
+  if (key.startsWith("section")) return "draft";
+  return (STAGE_KEYS as readonly string[]).includes(key) ? (key as StageKey) : null;
+}
+
+/** Track index (0-4) of a worker stage string; null when off-track. */
+function stageIdx(v: string | null | undefined): number | null {
+  const key = normalizeStage(v);
+  return key === null ? null : STAGE_KEYS.indexOf(key);
 }
 
 /**
- * Map a task onto the 5-stage track:
+ * Map a task onto the 5-stage track.
+ *
+ * The pipeline is FORWARD-ONLY (it never returns to an earlier stage), so
+ * the current stage is the MAX track index across ALL steps: "section i/n"
+ * counts as draft, the per-sub-question investigate repeats keep
+ * investigate current, "documents"/"queued" never count. The max stage is
+ * current (pulses) for a running task / err for a failed one; earlier
+ * stages are done, later ones todo. With no on-track step yet,
+ * task.current_step falls through the same normalize; still none → all
+ * todo.
+ *
  *  - pending   → all todo (the strip renders its all-dim variant)
  *  - completed → all done
- *  - running   → the latest step's stage = current (pulses); stages before
- *                it = done; a stage that appears anywhere earlier in the
- *                steps (multi-round repeats) is done too; current wins for
- *                its own stage. A pre-pipeline last step (queued/documents)
- *                lights the first stage.
- *  - failed    → stages before the last step's stage = done, that stage =
- *                err (solid red), the rest dim.
+ *  - running   → i < cur done · i === cur current · i > cur todo
+ *  - failed    → i < cur done · i === cur err · i > cur todo
  */
 export function deriveStageStates(task: Task): StripStage[] {
   if (task.status === "pending") {
-    return STAGE_NAMES.map((name) => ({ name, state: "todo" }));
+    return STAGE_NAMES.map((name) => ({ name, state: "todo" as const }));
   }
   if (task.status === "completed") {
-    return STAGE_NAMES.map((name) => ({ name, state: "done" }));
+    return STAGE_NAMES.map((name) => ({ name, state: "done" as const }));
   }
 
-  const last = task.steps[task.steps.length - 1];
-  const currentIdx = stageIndex(last ? last.stage : task.current_step);
-
-  // Stages that appeared in any step before the last one (round repeats).
-  const lastPos = Math.max(0, task.steps.length - 1);
-  const seen = new Set<number>();
-  for (const step of task.steps.slice(0, lastPos)) {
-    const i = stageIndex(step.stage);
-    if (i >= 0) seen.add(i);
-  }
-
-  return STAGE_NAMES.map((name, i) => {
-    let state: StageState;
-    if (task.status === "failed") {
-      state = i < currentIdx ? "done" : i === currentIdx ? "err" : "todo";
-    } else {
-      const cur = currentIdx === -1 ? 0 : currentIdx;
-      state =
-        i === cur ? "current" : i < cur || (currentIdx !== -1 && seen.has(i)) ? "done" : "todo";
+  let currentIdx: number | null = null;
+  for (const step of task.steps) {
+    const i = stageIdx(step.stage);
+    if (i !== null && (currentIdx === null || i > currentIdx)) {
+      currentIdx = i;
     }
+  }
+  if (currentIdx === null) currentIdx = stageIdx(task.current_step);
+
+  const failed = task.status === "failed";
+  return STAGE_NAMES.map((name, i) => {
+    const state: StageState =
+      currentIdx === null
+        ? "todo"
+        : i < currentIdx
+          ? "done"
+          : i === currentIdx
+            ? failed
+              ? "err"
+              : "current"
+            : "todo";
     return { name, state };
   });
 }

@@ -1,6 +1,6 @@
 "use client";
 
-// Left rail: wordmark, theme toggle, NEW RESEARCH form.
+// Left rail: wordmark, NEW RESEARCH form, theme toggle (pinned to the bottom).
 // Files upload to the worker immediately (staged for the NEXT created
 // task); START posts the run. The worker's staging registry is the source
 // of truth — chips mirror GET /documents after each upload.
@@ -120,7 +120,7 @@ export function Rail({ pendingCount, runningCount, onCreated }: RailProps) {
 
   return (
     <aside className="border-b border-hairline bg-surface min-[960px]:border-b-0 min-[960px]:border-r">
-      <div className="flex flex-col gap-6 p-5">
+      <div className="flex h-full flex-col gap-6 p-5">
         <div className="flex flex-col gap-1">
           <p className="font-display text-[15px] font-bold tracking-[0.18em]">
             DEEP <span className="text-accent">REACH</span>
@@ -129,8 +129,6 @@ export function Rail({ pendingCount, runningCount, onCreated }: RailProps) {
             DEEP RESEARCH CONSOLE
           </p>
         </div>
-
-        <ThemeToggle />
 
         <button
           type="button"
@@ -159,12 +157,12 @@ export function Rail({ pendingCount, runningCount, onCreated }: RailProps) {
                 New research
               </span>
               <textarea
-                rows={3}
+                rows={6}
                 aria-label="Research topic"
                 value={topic}
                 onChange={(e) => setTopic(e.target.value)}
                 placeholder="What should we dig into?"
-                className="w-full resize-none rounded-none border border-hairline bg-field px-3 py-2 text-[13px] placeholder:text-dim/70"
+                className="min-h-[120px] w-full resize-none rounded-none border border-hairline bg-field px-3 py-2 text-[15px] placeholder:text-dim/70"
               />
             </div>
 
@@ -282,6 +280,10 @@ export function Rail({ pendingCount, runningCount, onCreated }: RailProps) {
               </p>
             )}
           </form>
+        </div>
+
+        <div className="mt-auto border-t border-hairline pt-6">
+          <ThemeToggle />
         </div>
       </div>
     </aside>
