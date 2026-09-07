@@ -159,6 +159,9 @@ Non-fatal issues still produce a 200 body; the count is in
 - `7 citation marker(s) without a matching source citation_key (stripped)`
 - `citation 42 has no source anchor`
 - `math: <KaTeX error message>` (the offending formula falls back to visible escaped text)
+- `math fallback: unbalanced braces in equation — showing raw LaTeX` (a display
+  equation that still fails the structural gate after brace balancing, e.g. an
+  unmatched opener; the raw LaTeX is shown in a fallback span)
 
 ### Examples
 

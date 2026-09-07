@@ -14,7 +14,7 @@ import {
   type TableCell,
 } from "../document.js";
 import { citationSup, CITATION_MARKER_RE } from "../citations.js";
-import { renderMath, splitMath, stripMathDelimiters, _stripDollarDelimiters } from "./math.js";
+import { renderMath, splitMath, stripMathDelimiters, _stripDollarDelimiters, balanceBraces } from "./math.js";
 
 /** Escape a string for safe use in an HTML text node. */
 export function escapeHtml(s: string): string {
@@ -90,7 +90,7 @@ function renderCitedText(text: string, positions: readonly number[], warnings: s
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     if (seg.kind === "math") {
-      out += renderMath(seg.tex, seg.display, warnings);
+      out += renderMath(seg.tex, seg.display, warnings, "inline");
       continue;
     }
     if (i < segments.length - 1) {
@@ -295,8 +295,13 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
       // else renders as a plain code block, unchanged.
       if (block.language.toLowerCase() === "latex" || block.language.toLowerCase() === "tex") {
         const warnings: string[] = [];
-        const tex = _stripDollarDelimiters(block.text.trim());
-        const html = `<div class="equation">${renderMath(tex, true, warnings)}</div>`;
+        // The body is typeset verbatim (display math): balance a stray
+        // unmatched closing brace before the well-formedness gate so the
+        // classic LLM typo (task 427f039f) still typesets; a body that is
+        // still malformed (e.g. an unmatched opener) falls back to the
+        // visible literal with a surfaced warning.
+        const tex = balanceBraces(_stripDollarDelimiters(block.text.trim()));
+        const html = `<div class="equation">${renderMath(tex, true, warnings, "equation")}</div>`;
         reportWarnings(warnings, opts);
         return html;
       }
@@ -328,6 +333,9 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
       // `F(\psi) = \operatorname{Tr}…`. A `$`-bearing block without outer
       // delimiters now typesets (its `$` were its delimiters).
       const stripped = _stripDollarDelimiters(tex);
+      // Same repair as the latex code_block path: drop a stray unmatched
+      // closing brace before the gate (see balanceBraces).
+      const balanced = balanceBraces(stripped);
       // Typeset when the producer said so (language latex/tex), when the
       // text carried $$ / \[ \] delimiters, or when it carried inline `$`.
       if (
@@ -337,7 +345,7 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
         stripped !== tex
       ) {
         const warnings: string[] = [];
-        const html = `<div class="equation">${renderMath(stripped, true, warnings)}</div>`;
+        const html = `<div class="equation">${renderMath(balanced, true, warnings, "equation")}</div>`;
         reportWarnings(warnings, opts);
         return html;
       }

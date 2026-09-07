@@ -99,16 +99,79 @@ export function _isWellFormedMath(tex: string): boolean {
 }
 
 /**
+ * Drop closing braces that have no matching opener; everything else is kept
+ * byte-identical.
+ *
+ * Single left-to-right pass tracking brace depth (escaped braces are skipped
+ * exactly like _isWellFormedMath: a `\\` consumes its following character).
+ * Any `}` that would take the depth negative is an unmatched closer — the
+ * classic LLM typo, real task 427f039f shipped `Q^* = \\dfrac{F}{p - c} - c}`
+ * (2 opens, 3 closes), which fails the gate and degraded to a literal
+ * `math-fallback` in the PDF — and is dropped, giving the intended
+ * `Q^* = \\dfrac{F}{p - c} - c`. No closers are ever added, unmatched
+ * OPENERS are left untouched (no guessing), and an already-balanced input
+ * round-trips exactly.
+ */
+export function balanceBraces(tex: string): string {
+  if (!tex.includes("}")) return tex;
+  let out = "";
+  let depth = 0;
+  let changed = false;
+  for (let i = 0; i < tex.length; i++) {
+    const c = tex[i];
+    if (c === "\\") {
+      out += c;
+      if (i + 1 < tex.length) {
+        out += tex[i + 1];
+        i++;
+      }
+      continue;
+    }
+    if (c === "{") {
+      depth++;
+      out += c;
+    } else if (c === "}") {
+      if (depth === 0) {
+        changed = true;
+        continue; // unmatched closer — drop it
+      }
+      depth--;
+      out += c;
+    } else {
+      out += c;
+    }
+  }
+  return changed ? out : tex;
+}
+
+/** Where a math region came from; decides whether the gate fallback is surfaced. */
+export type MathKind = "equation" | "inline";
+
+/**
  * Render TeX to an HTML fragment via KaTeX (`renderToString`,
  * `throwOnError: true`). Regions that fail the structural gate
  * (`_isWellFormedMath`) are returned as the escaped `math-fallback` span
- * WITHOUT touching KaTeX and WITHOUT a scary warning — malformed model math
- * degrades to plain text silently. Well-formed regions — including kets and
- * norms — proceed to KaTeX; the rare well-formed-but-KaTeX-rejects case still
- * records `math: <message>` in `warnings` and falls back.
+ * WITHOUT touching KaTeX and without a scary `KaTeX parse error` warning.
+ *
+ * `kind` decides how the gate fallback is reported: `"equation"`
+ * (display equation blocks, latex code blocks) pushes the diagnostic
+ * `math fallback: unbalanced braces in equation — showing raw LaTeX`
+ * into `warnings` (surfaced via the X-paperbot-warnings header); `"inline"`
+ * (prose math segments) keeps the documented silent degradation.
+ * Well-formed regions — including kets and norms — proceed to KaTeX; the
+ * rare well-formed-but-KaTeX-rejects case still records `math: <message>`
+ * in `warnings` and falls back.
  */
-export function renderMath(tex: string, display: boolean, warnings: string[]): string {
+export function renderMath(
+  tex: string,
+  display: boolean,
+  warnings: string[],
+  kind: MathKind = "inline",
+): string {
   if (!_isWellFormedMath(tex)) {
+    if (kind === "equation") {
+      warnings.push("math fallback: unbalanced braces in equation — showing raw LaTeX");
+    }
     console.debug(`math: malformed region rendered as plain text (no KaTeX call): ${tex.slice(0, 60)}`);
     return `<span class="math-fallback">${escapeHtml(tex)}</span>`;
   }
