@@ -14,7 +14,7 @@ The three worker agents are:
 1. A configurable OpenAI-compatible LLM used by all agents, with per-agent model, reasoning-effort, and output-token overrides
 2. Step-by-step function calling that allows the agents to interact with one another
 3. Qdrant vector database for local PDF retrieval
-4. Tavily for web search
+4. Config-selectable web search (Tavily or a local SearXNG instance)
 5. SQLite for short-term memory
 6. Gradio UI for browser-based interaction
 7. An optional 5-stage deep-research pipeline (`--mode deep`) for long-form, heavily cited reports
@@ -33,13 +33,24 @@ Information retrieval from PDFs is handled in the following stages:
 - Similarity search is then used to retrieve the most relevant chunks across the indexed documents.
 - The retrieved chunks include citation metadata such as document name and page number.
 
-2. Tavily Web Search
+2. Web Search (config-selectable)
 
-Tavily is used to retrieve up-to-date or external information from the web. The retriever can use it when:
+Web search is used to retrieve up-to-date or external information from the web. The retriever can use it when:
 
 - the indexed PDFs do not cover the query
 - document evidence is weak or incomplete
 - newer information is needed
+
+The backend is selected in `utils/var.env` (see `.env.example`):
+
+- `SEARCH_TOOL=tavily` (default) — the Tavily API; requires `TAVILY_API_KEY`.
+- `SEARCH_TOOL=searxng` — a local SearXNG meta-search instance; requires no API key/quota. Set `SEARXNG_URL` to its base URL (default `http://localhost:8081`).
+
+Both backends return the same result shape and never raise — on any error the
+retriever simply gets zero web results. SearXNG must be configured to allow
+JSON output: in its `settings.yml` add `- json` under `search: formats:`
+(e.g. `formats: [html, json]`), or the web tool logs a warning and returns
+nothing. See `utils/search.py` for the implementation.
 
 ### Worker Agents
 
