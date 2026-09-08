@@ -148,6 +148,38 @@ def test_insufficient_pack_not_reused(monkeypatch, tmp_path):
     assert ecache.lookup_evidence("question x", 30) is None
 
 
+def test_zero_evidence_pack_never_saved(monkeypatch, tmp_path):
+    _fresh_db(monkeypatch, tmp_path)
+    zero = {"document_evidence": {"chunks": []}, "web_evidence": {"results": []}}
+    ecache.save_evidence("s1", "dead query", zero, True)
+    assert _row_count() == 0  # failed retrieval must not poison the cache
+    assert ecache.lookup_evidence("dead query", 30) is None
+
+
+def test_stored_zero_row_is_a_lookup_miss(monkeypatch, tmp_path):
+    _fresh_db(monkeypatch, tmp_path)
+    # Rows written before the save-side guard (or by other writers) can
+    # still hold zero packs; lookup must treat them as misses.
+    _insert("s1", "legacy zero query", _days_ago(1),
+            {"document_evidence": {}, "web_evidence": {}})
+    assert ecache.lookup_evidence("legacy zero query", 30) is None
+    assert ecache.lookup_evidence_detail("legacy zero query", 30) is None
+
+
+def test_evidence_pack_empty_helper():
+    assert ecache.evidence_pack_empty(None)
+    assert ecache.evidence_pack_empty({})
+    assert ecache.evidence_pack_empty(
+        {"document_evidence": {"chunks": []}, "web_evidence": {"results": []}}
+    )
+    assert not ecache.evidence_pack_empty(
+        {"document_evidence": {"chunks": [{"content": "x"}]}, "web_evidence": {}}
+    )
+    assert not ecache.evidence_pack_empty(
+        {"document_evidence": {"chunks": []}, "web_evidence": {"results": [{"url": "u"}]}}
+    )
+
+
 def test_tie_break_most_recent_retrieved_at_wins(monkeypatch, tmp_path):
     _fresh_db(monkeypatch, tmp_path)
     # Same question text (jaccard 1.0 for both) from two different sessions.

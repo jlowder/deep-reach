@@ -31,6 +31,22 @@ import utils.config  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# Config-failure categories already warned about in this process. A dead
+# backend is retried by every sub-question round, so repeats would spam the
+# log; web_search() clears the set on a non-empty result, so a
+# recovered-then-broken configuration warns again instead of going silent.
+_warned: set[str] = set()
+
+
+def _warn_once(category: str, msg: str, *args: Any) -> None:
+    """Emit a config-failure warning once per failure state; repeats at
+    debug. Never raises."""
+    if category in _warned:
+        logger.debug(msg, *args)
+    else:
+        _warned.add(category)
+        logger.warning(msg, *args)
+
 # Maximum characters to retain per result content. Tavily can return 3-15KB
 # of raw HTML/Markdown per result; cap it so accumulated results across
 # iterations stay within the context window.
@@ -97,10 +113,11 @@ class TavilySearchTool(SearchTool):
             self._client_built = True
             api_key = os.getenv("TAVILY_API_KEY")
             if not api_key:
-                logger.warning(
+                _warn_once(
+                    "tavily:no-key",
                     "SEARCH_TOOL=tavily but TAVILY_API_KEY is not set; web "
                     "search will return no results. Set the key or switch to "
-                    "SEARCH_TOOL=searxng."
+                    "SEARCH_TOOL=searxng.",
                 )
             else:
                 # Local import: module import must not require the SDK.
@@ -124,7 +141,7 @@ class TavilySearchTool(SearchTool):
             )
             results = result.get("results", [])
         except Exception as e:
-            logger.warning("Tavily search failed for %r: %s", query, e)
+            _warn_once("tavily:error", "Tavily search failed for %r: %s", query, e)
             return {"query": query, "results": []}
         return {"query": query, "results": [_whitelist_result(r) for r in results]}
 
@@ -153,11 +170,17 @@ class SearxngSearchTool(SearchTool):
                 timeout=30,
             )
         except Exception as e:
-            logger.warning("SearXNG request to %s failed: %s", self.base_url, e)
+            _warn_once(
+                "searxng:unreachable",
+                "SearXNG request to %s failed: %s",
+                self.base_url,
+                e,
+            )
             return {"query": query, "results": []}
 
         if resp.status_code != 200:
-            logger.warning(
+            _warn_once(
+                f"searxng:http-{resp.status_code}",
                 "SearXNG at %s returned HTTP %s — if the body says the json "
                 "format is not enabled, add '- json' under 'search: formats:' "
                 "in SearXNG's settings.yml.",
@@ -169,7 +192,8 @@ class SearxngSearchTool(SearchTool):
         try:
             data = resp.json()
         except Exception as e:
-            logger.warning(
+            _warn_once(
+                "searxng:not-json",
                 "SearXNG at %s returned a non-JSON body (HTML?): %s — enable "
                 "the json format in settings.yml (search: formats: [html, json]).",
                 self.base_url,
@@ -197,7 +221,8 @@ def get_search_tool() -> SearchTool:
     if tool == "searxng":
         return SearxngSearchTool()
     if tool != "tavily":
-        logger.warning(
+        _warn_once(
+            f"unknown-tool:{tool}",
             "Unknown SEARCH_TOOL %r (expected 'tavily' or 'searxng'); "
             "falling back to tavily.",
             tool,
@@ -207,4 +232,7 @@ def get_search_tool() -> SearchTool:
 
 def web_search(query: str, num_results: int = 5) -> Dict[str, Any]:
     """Config-selected web search. Never raises; returns empty results on error."""
-    return get_search_tool().search(query, num_results)
+    out = get_search_tool().search(query, num_results)
+    if out.get("results"):
+        _warned.clear()  # backend answered: config failures may warn again later
+    return out

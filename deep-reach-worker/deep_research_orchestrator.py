@@ -31,7 +31,11 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
-from memory.evidence_cache import lookup_evidence_detail, save_evidence
+from memory.evidence_cache import (
+    evidence_pack_empty,
+    lookup_evidence_detail,
+    save_evidence,
+)
 from memory.helpers import (
     assign_citation_keys,
     format_references,
@@ -802,6 +806,22 @@ def deep_research(
                         )
             packs[sq_id] = pack_dict
             state["sub_question_evidence"][sq_id] = packs[sq_id]
+            if evidence_pack_empty(pack_dict):
+                # Zero-evidence packs are the unsourced-run root cause; the
+                # step timeline is the only operator-visible record of it.
+                _notify_stage(
+                    2,
+                    f"no evidence retrieved for sub-question {len(packs)}/{len(sub_questions)} — check sources/budget",
+                )
+        total_web = sum(
+            len(((p.get("web_evidence") or {}).get("results")) or [])
+            for p in packs.values()
+        )
+        if total_web == 0 and budget_web > 0:
+            _notify_stage(
+                2,
+                "web search returned no results — check SEARCH_TOOL configuration",
+            )
         investigate_extra = f"packs={len(packs)}"
         if stats["cache_hits"]:
             investigate_extra += f" cache_hits={stats['cache_hits']}"

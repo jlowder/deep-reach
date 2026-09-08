@@ -260,3 +260,73 @@ def test_retriever_agent_imports_without_tavily_key(monkeypatch):
     importlib.reload(ra)
     assert hasattr(ra, "web_search")
     assert "tavily" not in sys.modules
+
+
+# ---------------------------------------------------------------------------
+# Config-failure visibility: warn once per failure state, never raise
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _reset_warn_state():
+    search._warned.clear()
+    yield
+    search._warned.clear()
+
+
+def test_searxng_unreachable_warns_once_not_per_call(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("SEARCH_TOOL", "searxng")
+
+    def boom(url, params=None, timeout=None):
+        raise ConnectionError("tunnel down")
+
+    monkeypatch.setattr(search.requests, "get", boom)
+    with caplog.at_level(logging.WARNING, logger="utils.search"):
+        out1 = search.web_search("q1")
+        out2 = search.web_search("q2")
+        out3 = search.web_search("q3")
+    assert out1 == {"query": "q1", "results": []}
+    assert out3 == {"query": "q3", "results": []}
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1  # one per failure state, not one per call
+
+
+def test_searxng_failure_warns_again_after_recovery(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("SEARCH_TOOL", "searxng")
+
+    def boom(url, params=None, timeout=None):
+        raise ConnectionError("tunnel down")
+
+    monkeypatch.setattr(search.requests, "get", boom)
+    search.web_search("q1")
+    # Backend recovers: a non-empty answer clears the failure state.
+    install_fake_get(
+        monkeypatch,
+        lambda url, params: FakeResp(200, {"results": fake_searxng_results(2)}),
+    )
+    out = search.web_search("q1")
+    assert len(out["results"]) == 2
+    caplog.clear()
+    # Breaks again → warns afresh instead of going silent for the process.
+    monkeypatch.setattr(search.requests, "get", boom)
+    with caplog.at_level(logging.WARNING, logger="utils.search"):
+        search.web_search("q1")
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+
+
+def test_tavily_missing_key_warns_once(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("SEARCH_TOOL", "tavily")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    with caplog.at_level(logging.WARNING, logger="utils.search"):
+        out1 = search.web_search("q1")
+        out2 = search.web_search("q2")
+    assert out1 == {"query": "q1", "results": []}
+    assert out2 == {"query": "q2", "results": []}
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
