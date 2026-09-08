@@ -41,6 +41,7 @@ Environment:  PORT (default 8321), HOST (default 0.0.0.0)
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -104,6 +105,7 @@ class TaskRecord:
     finished_at: Optional[float] = None
     error: Optional[str] = None
     stats: Optional[dict] = None
+    quality: Optional[dict] = None
     report_json: Optional[str] = None
     # Requested budgets, kept on the record so the queue pump can rebuild
     # the run args when it promotes this record to "running".
@@ -285,6 +287,12 @@ def create_app(
                         record.stats = result.get("stats")
                         if isinstance(report_json, str):
                             record.report_json = report_json
+                            try:
+                                q = json.loads(report_json).get("quality")
+                                if isinstance(q, dict):
+                                    record.quality = q
+                            except Exception:
+                                pass  # quality stays None; the artifact is kept
         except Exception as exc:
             # Artifact storage must never wedge the task/queue: record the
             # failure instead of leaving the record stuck "running".
@@ -355,6 +363,9 @@ def create_app(
             "topic": t.topic,
             "status": t.status,
             "current_step": t.current_step,
+            "max_rounds": t.max_rounds,
+            "budget_doc": t.budget_doc,
+            "budget_web": t.budget_web,
             "step_count": len(t.steps),
             "started_at": t.started_at,
             "finished_at": t.finished_at,
@@ -479,6 +490,9 @@ def create_app(
             "task_id": record.id,
             "status": record.status,
             "current_step": record.current_step,
+            "max_rounds": record.max_rounds,
+            "budget_doc": record.budget_doc,
+            "budget_web": record.budget_web,
             "documents": record.documents,
             "links": {
                 "status": f"/research/{record.id}",
@@ -505,6 +519,9 @@ def create_app(
                 "status": t.status,
                 "current_step": t.current_step,
                 "steps": list(t.steps),
+                "max_rounds": t.max_rounds,
+                "budget_doc": t.budget_doc,
+                "budget_web": t.budget_web,
                 "started_at": t.started_at,
                 "finished_at": t.finished_at,
                 "documents": list(t.documents),
@@ -513,6 +530,8 @@ def create_app(
                 body["error"] = t.error
             if t.stats is not None:
                 body["stats"] = t.stats
+            if t.quality is not None:
+                body["quality"] = t.quality
         return body
 
     @app.delete("/research/{task_id}")

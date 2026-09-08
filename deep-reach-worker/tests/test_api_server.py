@@ -173,6 +173,111 @@ def test_budgets_forwarded_to_run_fn():
     }
 
 
+def test_post_echoes_requested_budgets(client):
+    body = client.post(
+        "/research",
+        json={"topic": "t", "max_rounds": 2, "budget_doc": 3, "budget_web": 1},
+    ).json()
+    assert {
+        "max_rounds": body["max_rounds"],
+        "budget_doc": body["budget_doc"],
+        "budget_web": body["budget_web"],
+    } == {"max_rounds": 2, "budget_doc": 3, "budget_web": 1}
+
+
+def test_get_and_list_carry_budgets(client):
+    client.post(
+        "/research",
+        json={"topic": "t", "max_rounds": 2, "budget_doc": 3, "budget_web": 1},
+    )
+    task_id = client.get("/research").json()["tasks"][0]["id"]
+    last = _wait(client, task_id)
+    assert (last["max_rounds"], last["budget_doc"], last["budget_web"]) == (
+        2, 3, 1
+    )
+    summary = client.get("/research").json()["tasks"][0]
+    assert (summary["max_rounds"], summary["budget_doc"], summary["budget_web"]) == (
+        2, 3, 1
+    )
+
+
+def test_defaults_when_budgets_omitted(client):
+    task_id = client.post("/research", json={"topic": "t"}).json()["task_id"]
+    last = _wait(client, task_id)
+    assert (last["max_rounds"], last["budget_doc"], last["budget_web"]) == (
+        3, 10, 5
+    )
+
+
+def _make_zero_run_fn():
+    """Fake run_fn shaped like a zero-evidence run: the report has zero
+    sources and its quality object reflects that (the shape assembly
+    computes for an unsourced run)."""
+
+    def run_fn(topic, **kwargs):
+        on_stage = kwargs.get("on_stage")
+        for n, detail in (
+            (1, "decomposing query"),
+            (2, "investigating 1 sub-question(s)"),
+            (3, "drafting 1 section(s)"),
+            (4, "critic pass"),
+            (5, "assembling final report"),
+        ):
+            if on_stage is not None:
+                on_stage(n, detail)
+        return {
+            "final_answer": f"fake answer for {topic}",
+            "state": {
+                "report_json": json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "report": {"sources": [], "sections": []},
+                        "quality": {
+                            "citation_density": {"overall": 0.0, "per_section": {}},
+                            "verification": {
+                                "confidence": "medium",
+                                "coverage": "moderate",
+                                "gaps": [],
+                                "unresolvable_citations": ["D2", "W1"],
+                                "dropped_bare_citations": [],
+                            },
+                            "sources_count": {"documents": 0, "web": 0},
+                            "total_words": 900,
+                        },
+                    }
+                )
+            },
+            "stats": {"llm_calls": 9, "wall_s": 1.0, "sections": 1},
+        }
+
+    run_fn.calls = []
+    return run_fn
+
+
+def test_get_body_includes_quality():
+    client = TestClient(api_server.create_app(run_fn=_make_zero_run_fn()))
+    task_id = client.post("/research", json={"topic": "unsourced"}).json()[
+        "task_id"
+    ]
+    last = _wait(client, task_id)
+    q = last["quality"]
+    assert q["citation_density"]["overall"] == 0.0
+    assert q["sources_count"] == {"documents": 0, "web": 0}
+    assert q["verification"]["unresolvable_citations"] == ["D2", "W1"]
+    assert q["total_words"] == 900
+
+
+def test_quality_absent_when_run_fails():
+    def failing(topic, **kwargs):
+        raise RuntimeError("boom")
+
+    client = TestClient(api_server.create_app(run_fn=failing))
+    task_id = client.post("/research", json={"topic": "t"}).json()["task_id"]
+    last = _wait(client, task_id)
+    assert last["status"] == "failed"
+    assert "quality" not in last
+
+
 def test_second_post_while_running_is_queued_pending():
     """New contract (was: 409 while busy): a POST accepted while a run is
     in progress is queued with 202 as status "pending", starts no second
