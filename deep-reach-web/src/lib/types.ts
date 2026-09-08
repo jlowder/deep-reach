@@ -23,6 +23,62 @@ export interface TaskLinks {
   report: string;
 }
 
+/** Deterministic quality metrics on the worker's final report: citation
+ *  density, verification verdict, source counts, total size. Shape mirrors
+ *  the worker's quality builder (citation_density.overall / per_section,
+ *  verification.{confidence,coverage,gaps,unresolvable_citations,
+ *  dropped_bare_citations}, sources_count.{documents,web}, total_words). */
+export interface TaskQuality {
+  citation_density: { overall: number; per_section: Record<string, number> };
+  verification: {
+    confidence?: string;
+    coverage?: string;
+    gaps?: string[];
+    unresolvable_citations: string[];
+    dropped_bare_citations: string[];
+  };
+  sources_count: { documents: number; web: number };
+  total_words: number;
+}
+
+const _qobj = (v: unknown): Record<string, unknown> =>
+  typeof v === "object" && v !== null ? (v as Record<string, unknown>) : {};
+const _qnum = (v: unknown, d = 0): number =>
+  typeof v === "number" && Number.isFinite(v) ? v : d;
+const _qstr = (v: unknown): string | undefined =>
+  typeof v === "string" && v ? v : undefined;
+const _qstrs = (v: unknown): string[] =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+const _qmap = (v: unknown): Record<string, number> =>
+  typeof v === "object" && v !== null
+    ? Object.fromEntries(
+        Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, _qnum(x)]),
+      )
+    : {};
+
+/** Defensive normalization for `task.quality`: the worker emits the full
+ *  shape, but older/edge responses may miss parts — default every field.
+ *  Returns null when there is no quality object at all. */
+export function normalizeQuality(raw: unknown): TaskQuality | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  const cd = _qobj(r.citation_density);
+  const v = _qobj(r.verification);
+  const sc = _qobj(r.sources_count);
+  return {
+    citation_density: { overall: _qnum(cd.overall), per_section: _qmap(cd.per_section) },
+    verification: {
+      confidence: _qstr(v.confidence),
+      coverage: _qstr(v.coverage),
+      gaps: _qstrs(v.gaps),
+      unresolvable_citations: _qstrs(v.unresolvable_citations),
+      dropped_bare_citations: _qstrs(v.dropped_bare_citations),
+    },
+    sources_count: { documents: _qnum(sc.documents), web: _qnum(sc.web) },
+    total_words: _qnum(r.total_words),
+  };
+}
+
 /** Full record from GET /research/{id}. */
 export interface Task {
   id: string;
@@ -35,6 +91,8 @@ export interface Task {
   finished_at: number | null;
   error?: string | null;
   stats?: TaskStats | null;
+  /** raw quality object from the worker — run through normalizeQuality() */
+  quality?: unknown;
   documents?: string[];
   links?: TaskLinks;
 }

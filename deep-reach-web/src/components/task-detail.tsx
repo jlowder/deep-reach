@@ -15,7 +15,13 @@ import {
   normalizeStage,
   type StripStage,
 } from "@/lib/stages";
-import type { Task, TaskStatus, TaskStep, TaskSummary } from "@/lib/types";
+import {
+  normalizeQuality,
+  type Task,
+  type TaskStatus,
+  type TaskStep,
+  type TaskSummary,
+} from "@/lib/types";
 import { PipelineStrip } from "./pipeline-strip";
 
 const CHIP: Record<TaskStatus, string> = {
@@ -45,6 +51,13 @@ export function TaskDetail({ task, summary, queuePosition, updateError, onDelete
 
   const last = task?.steps[task.steps.length - 1];
   const docs = base.documents ?? [];
+  const quality = task ? normalizeQuality(task.quality) : null;
+  const totalSources = quality
+    ? quality.sources_count.documents + quality.sources_count.web
+    : null;
+  // A completed run that retrieved no evidence: the report ships with zero
+  // citations by construction — make that legible, not invisible.
+  const unsourced = status === "completed" && totalSources === 0;
 
   return (
     <section
@@ -63,12 +76,27 @@ export function TaskDetail({ task, summary, queuePosition, updateError, onDelete
         >
           {status}
         </span>
+        {unsourced && (
+          <span className="shrink-0 bg-err-soft px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.12em] text-err">
+            unsourced
+          </span>
+        )}
       </div>
 
       <p className="font-mono text-[11px] text-dim">
         id {id} · created {fmtClock(base.started_at)} ·{" "}
         {fmtElapsed(base.started_at, base.finished_at)}
+        {totalSources !== null && (
+          <> · {totalSources} source{totalSources === 1 ? "" : "s"}</>
+        )}
       </p>
+
+      {unsourced && (
+        <p className="font-mono text-[11px] text-dim">
+          No evidence was retrieved — this report has no citations (see step
+          log).
+        </p>
+      )}
 
       {updateError && (
         <p

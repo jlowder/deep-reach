@@ -126,6 +126,7 @@ export function normalizeTask(raw: unknown): Task {
     finished_at: optNum(r.finished_at),
     error: typeof r.error === "string" ? r.error : null,
     stats: statsOf(r.stats),
+    quality: isRecord(r.quality) ? r.quality : undefined,
     documents: strArray(r.documents),
     links: linksOf(r.links),
   };
