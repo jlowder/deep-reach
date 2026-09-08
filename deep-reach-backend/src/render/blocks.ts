@@ -389,7 +389,15 @@ export function renderReferences(sources: Source[]): string {
         );
       }
 
+      // The citation key (W1/D2, …) is the label producer-side prose may
+      // still carry (older reports, direct uploads). The bibliography is
+      // the only place it can be defined in-document, so print it beside
+      // the positional number; sources without a key render exactly as
+      // before (no empty element).
       const inner: string[] = [`<span class="ref-num">[${s.position}]</span>`];
+      if (s.citationKey !== "") {
+        inner.push(`<span class="ref-key">${escapeHtml(s.citationKey)}</span>`);
+      }
       inner.push(`<span class="ref-title">${escapeHtml(s.title)}</span>`);
       if (detail !== "") inner.push(`<span class="ref-detail"> — ${escapeHtml(detail)}</span>`);
       if (links.length > 0) inner.push(`<div class="ref-links">${links.join(" ")}</div>`);

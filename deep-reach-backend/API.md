@@ -101,7 +101,10 @@ object, ignored by rendering). `report`:
   doi | DOI?, citation_key?, accessed? }` — only `title` is required.
   `author` may be a string or string array. Numeric citations resolve to
   1-based array positions; string citations and bracket markers like `[W4]`
-  resolve to `citation_key`.
+  resolve to `citation_key`. The rendered References section prints each
+  source as its 1-based position, then its `citation_key` (when non-empty,
+  as a mono token), then title, details, and links — so prose that names a
+  key (e.g. “W1”) resolves to a visible entry in the document.
 
 **Blocks** (any order inside `sections[].blocks`; unknown `type` values are
 kept and rendered as paragraphs when they carry text):
