@@ -153,15 +153,6 @@ export function normalizeForTextCheck(s: string): string {
     .replace(/-\s+/g, "-");
 }
 
-/** Caseless in-order subsequence test (the loose fallback's comparator). */
-function isSubsequence(needle: string, haystack: string): boolean {
-  let i = 0;
-  for (let j = 0; j < haystack.length && i < needle.length; j++) {
-    if (haystack[j] === needle[i]) i++;
-  }
-  return i === needle.length;
-}
-
 export interface TitleCheckResult {
   ok: boolean;
   /** true when `ok` relied on the loose (non-alphanumeric) fallback. */
@@ -178,10 +169,13 @@ export interface TitleCheckResult {
  * substring of the normalized extracted text (this is what wrapped
  * hyphenated words defeat in the raw layer). Loose fallback: if strict
  * fails, strip ALL non-alphanumerics (lowercased) from both sides and
- * require the title to be an in-order SUBSEQUENCE of the text — a title
- * the PDF genuinely cannot contain will still fail, but extractor line
- * joining, hyphenation, and case/spacing artifacts will not. Loose passes
- * report `loose: true` so the caller can surface a warning.
+ * require the expected title to appear as a SUBSTRING of the squashed
+ * text — extractor line-joining, hyphenation, and case/spacing artifacts
+ * all disappear under squashing, but a genuinely absent title does not.
+ * (Not a bare character subsequence: a long document contains any common
+ * letter run "in order", which would let a tampered title through — the
+ * ZZZ tamper probe proved it.) Loose passes report `loose: true` so the
+ * caller can surface a warning.
  */
 export function checkTitleInText(
   expectedTitle: string,
@@ -194,7 +188,7 @@ export function checkTitleInText(
   const squish = (s: string) =>
     s.toLowerCase().replace(/[^a-z0-9]/g, "");
   const e = squish(expected);
-  if (e !== "" && isSubsequence(e, squish(text))) {
+  if (e !== "" && squish(text).includes(e)) {
     return { ok: true, loose: true };
   }
   return {

@@ -74,8 +74,8 @@ test("checkTitleInText: strict pass on the real wrapped shape", () => {
 });
 
 test("checkTitleInText: loose fallback passes and is flagged", () => {
-  // Strict fails ("Real - World" ≠ "Real-World"); the loose alphanumeric
-  // subsequence ("realworld") succeeds.
+  // Strict fails ("Real - World" ≠ "Real-World"); the squashed loose
+  // comparison ("realworld" in "realworldcontexts") succeeds.
   const r = checkTitleInText("Real-World", "Real - World Contexts");
   assert.equal(r.ok, true);
   assert.equal(r.loose, true);
