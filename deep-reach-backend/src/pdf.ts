@@ -21,6 +21,8 @@ export interface PdfOptions {
   expectedTitle: string;
   /** Skip the pdf-parse text check (CLI --no-validate). Page count is still checked. */
   skipTextCheck?: boolean;
+  /** Receives non-fatal validation warnings (e.g. loose-mode title match). */
+  onWarning?: (warning: string) => void;
 }
 
 export interface PdfOutput {
@@ -131,7 +133,76 @@ async function renderPdfWithBrowser(browser: Browser, html: string, opts: PdfOpt
   await renderPdfCore(browser, html, opts.format, opts.outputPath);
 }
 
-const normalizeWs = (s: string) => s.replace(/\s+/g, " ").trim();
+/**
+ * Text-layer comparison normalization for the PDF title check.
+ *
+ * The PDF text layer (pdf.js joins lines with \n) breaks titles in ways a
+ * naive substring match can't survive: a wrapped hyphenated word extracts
+ * as "Real-\nWorld" -> "Real- World" after whitespace collapse, and
+ * producers may emit decomposed Unicode. So both sides of the check are:
+ * 1) NFC-normalized, 2) stripped of soft hyphens (\u00AD), 3) whitespace
+ * collapsed + trimmed, 4) re-joined across hyphen line-breaks
+ * ("Real- World" -> "Real-World"). Idempotent.
+ */
+export function normalizeForTextCheck(s: string): string {
+  return s
+    .normalize("NFC")
+    .replace(/\u00ad/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/-\s+/g, "-");
+}
+
+/** Caseless in-order subsequence test (the loose fallback's comparator). */
+function isSubsequence(needle: string, haystack: string): boolean {
+  let i = 0;
+  for (let j = 0; j < haystack.length && i < needle.length; j++) {
+    if (haystack[j] === needle[i]) i++;
+  }
+  return i === needle.length;
+}
+
+export interface TitleCheckResult {
+  ok: boolean;
+  /** true when `ok` relied on the loose (non-alphanumeric) fallback. */
+  loose: boolean;
+  /** Populated when !ok: a suffix for the error message with the start of
+   *  the extracted text, so a future hard failure is diagnosable. */
+  diagnostic?: string;
+}
+
+/**
+ * Title-containment check for a PDF's extracted text layer.
+ *
+ * Strict: the NFC/whitespace/hyphen-normalized title must appear as a
+ * substring of the normalized extracted text (this is what wrapped
+ * hyphenated words defeat in the raw layer). Loose fallback: if strict
+ * fails, strip ALL non-alphanumerics (lowercased) from both sides and
+ * require the title to be an in-order SUBSEQUENCE of the text — a title
+ * the PDF genuinely cannot contain will still fail, but extractor line
+ * joining, hyphenation, and case/spacing artifacts will not. Loose passes
+ * report `loose: true` so the caller can surface a warning.
+ */
+export function checkTitleInText(
+  expectedTitle: string,
+  extractedText: string,
+): TitleCheckResult {
+  const expected = normalizeForTextCheck(expectedTitle);
+  const text = normalizeForTextCheck(extractedText);
+  if (expected === "") return { ok: true, loose: false };
+  if (text.includes(expected)) return { ok: true, loose: false };
+  const squish = (s: string) =>
+    s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const e = squish(expected);
+  if (e !== "" && isSubsequence(e, squish(text))) {
+    return { ok: true, loose: true };
+  }
+  return {
+    ok: false,
+    loose: false,
+    diagnostic: ` (extracted begins: ${JSON.stringify(text.slice(0, 200))})`,
+  };
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -256,6 +327,8 @@ export type PdfParseFn = (
 export interface PdfValidateDeps {
   /** Override the parser (default: prime + vendored pdf-parse). */
   parse?: PdfParseFn;
+  /** Receives non-fatal validation warnings (e.g. loose-mode title match). */
+  onWarning?: (warning: string) => void;
 }
 
 export interface PdfValidationOk {
@@ -327,13 +400,16 @@ export async function validatePdfBuffer(
   }
 
   if (!opts.skipTextCheck) {
-    const expected = normalizeWs(opts.expectedTitle);
-    if (expected !== "" && !normalizeWs(parsed.text).includes(expected)) {
+    const check = checkTitleInText(opts.expectedTitle, parsed.text);
+    if (!check.ok) {
       return {
         ok: false,
         attempts,
-        error: `title "${opts.expectedTitle}" not found in extracted PDF text`,
+        error: `title "${opts.expectedTitle}" not found in extracted PDF text${check.diagnostic ?? ""}`,
       };
+    }
+    if (check.loose) {
+      deps.onWarning?.("title verified in loose mode (wrap/hyphen-tolerant match)");
     }
   }
 
@@ -380,7 +456,7 @@ export async function htmlToPdf(html: string, opts: PdfOptions): Promise<PdfOutp
     await browser.close().catch(() => {});
   }
 
-  const validation = await validatePdf(opts);
+  const validation = await validatePdf(opts, { onWarning: opts.onWarning });
   if (!validation.ok) {
     return { ok: false, error: validation.error };
   }
@@ -392,6 +468,8 @@ export interface PdfBufferOptions {
   format: PageFormat;
   expectedTitle: string;
   skipTextCheck?: boolean;
+  /** Receives non-fatal validation warnings (e.g. loose-mode title match). */
+  onWarning?: (warning: string) => void;
 }
 
 /**
@@ -412,7 +490,7 @@ export async function htmlToPdfBuffer(
   const b = browser ?? (await launchChromium());
   try {
     const buffer = await renderPdfCore(b, html, opts.format);
-    const validation = await validatePdfBuffer(buffer, opts);
+    const validation = await validatePdfBuffer(buffer, opts, { onWarning: opts.onWarning });
     if (!validation.ok) {
       throw new PaperbotError(validation.error, EXIT_RENDER);
     }
