@@ -475,6 +475,77 @@ def _promote_bare_equation_spans(report: ResearchReport) -> int:
     return promoted
 
 
+# Bare registry keys as they appear in prose: W1..Wn (web), D1..Dn (docs).
+_SOURCE_KEY_RE = re.compile(r"\b(?:W|D)\d+\b")
+
+
+def _rewrite_prose_source_keys(report: ResearchReport, registry: dict) -> int:
+    """Resolve bare registry keys in citation-note/callout span prose to the
+    source title they refer to.
+
+    The writer is told never to echo a registry key in prose, but its
+    evidence view shows sources as ``[W1] {title} ({url}, {date})`` so a
+    model may still write e.g. "keyed to the report source W1". The
+    bibliography prints positional ``[1]..[n]`` and never the key, so a bare
+    key in prose resolves to nothing for the reader (real task 0992eb85:
+    dangling "W1" in a Sources callout). Substituting the title fixes the
+    dangling reference deterministically.
+
+    Scope: span TEXT of ``citation_note`` and ``callout`` blocks only.
+    Keys absent from the registry are left untouched (never guess); a key
+    whose registry entry has no title is left untouched; a key whose title
+    itself contains a key that resolves to a DIFFERENT title is left
+    untouched (substituting it would cascade on a second pass — keeps the
+    rewrite idempotent); ``citations`` arrays, code, and equation spans are
+    never modified. Returns the number of spans rewritten. Never raises.
+    """
+    rewritten = 0
+    try:
+        for si, section in enumerate(report.report.sections or []):
+            for bi, block in enumerate(section.blocks or []):
+                if block.type not in (
+                    BlockType.citation_note,
+                    BlockType.callout,
+                    "citation_note",
+                    "callout",
+                ):
+                    continue
+                for span in block.spans or []:
+                    text = span.text or ""
+                    if not text:
+                        continue
+                    stripped = text.lstrip()
+                    if stripped.startswith(("$", "\\[", "\\(")):
+                        continue  # equation span: never touch equation text
+                    if not _SOURCE_KEY_RE.search(text):
+                        continue
+
+                    def repl(m: re.Match) -> str:
+                        entry = (registry or {}).get(m.group(0))
+                        title = (entry or {}).get("title") or ""
+                        if not title.strip():
+                            return m.group(0)  # no title: leave the key
+                        for tm in _SOURCE_KEY_RE.finditer(title):
+                            te = (registry or {}).get(tm.group(0))
+                            tt = (te or {}).get("title") or ""
+                            if tt.strip() and tt != title:
+                                return m.group(0)  # idempotency guard
+                        return title
+
+                    new = _SOURCE_KEY_RE.sub(repl, text)
+                    if new != text:
+                        span.text = new
+                        rewritten += 1
+                        logger.debug(
+                            "resolved bare source key(s) in citation prose: "
+                            "section %d block %d %r -> %r",
+                            si, bi, _snip(text, 60), _snip(new, 60),
+                        )
+    except Exception:
+        logger.exception("prose source-key rewrite failed; continuing unrewritten")
+    return rewritten
+
+
 def assemble_structured_report(
     *,
     sections: list,
@@ -495,7 +566,9 @@ def assemble_structured_report(
     Source records (plan §8.1), then renumber citation arrays and rewrite
     [D#]/[W#] text markers onto those final records (plan §6.3 — positions
     are 1-based into the deduped array, so they never go out of range),
-    drop sub-heading blocks with no content zone, promote undelimited
+    drop sub-heading blocks with no content zone, resolve bare registry keys
+    in citation-note/callout prose to source titles (the bibliography never
+    prints keys, so a prose key would dangle), promote undelimited
     display-equation spans to equation blocks, wrap undelimited inline LaTeX
     runs in prose spans with $...$, balance unmatched closing braces in
     equation block bodies, normalize
@@ -536,6 +609,7 @@ def assemble_structured_report(
     report.report.sources = [Source.model_validate(d) for d in source_dicts]
 
     _remap_citations_to_final_sources(report, registry)
+    _rewrite_prose_source_keys(report, registry)
     _promote_bare_equation_spans(report)
     _wrap_undelimited_latex(report)
     _balance_equation_bodies(report)
