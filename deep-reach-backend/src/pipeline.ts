@@ -215,6 +215,7 @@ export async function run(inputPath: string, opts: PipelineOptions): Promise<Pip
       format: opts.format ?? "letter",
       expectedTitle: prepared.model.metadata.title,
       skipTextCheck: opts.skipValidate,
+      onWarning: (w) => warnings.push(w),
     });
 
     if (!pdf.ok) {

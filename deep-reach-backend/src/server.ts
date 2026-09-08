@@ -217,6 +217,7 @@ export async function createServer(opts: ServerOptions = {}): Promise<FastifyIns
     }
 
     try {
+      const validationWarnings: string[] = [];
       const prepared = await prepareContent(content, inputFormat, "api", {
         outPath: "", // unused by prepareContent; kept for the PipelineOptions shape
         title,
@@ -241,8 +242,15 @@ export async function createServer(opts: ServerOptions = {}): Promise<FastifyIns
           format: pageFormat,
           expectedTitle: prepared.model.metadata.title,
           skipTextCheck: validate === false,
+          onWarning: (w) => validationWarnings.push(w),
         },
         browser,
+      );
+      // Validation may add warnings (e.g. loose-mode title match) after the
+      // prepare-time header was set — refresh with the combined count.
+      reply.header(
+        "x-paperbot-warnings",
+        String(prepared.warnings.length + validationWarnings.length),
       );
       reply.header("content-type", "application/pdf");
       reply.header("content-disposition", `attachment; filename="${slugify(prepared.model.metadata.title)}.pdf"`);
