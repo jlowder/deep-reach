@@ -1328,11 +1328,15 @@ def deep_research(
                 f"invented_keys_flagged={len(unresolvable_flagged)}"
             )
             _log_stage("5 ASSEMBLY", assembly_extra)
-            _notify_stage(
-                5,
+            complete_detail = (
                 f"complete (structured): {len(sections)} section(s), "
-                f"{len(report.report.sources)} source(s)",
+                f"{len(report.report.sources)} source(s)"
             )
+            if len(report.report.sources) == 0 and not all_doc and not all_web:
+                # Honest terminal state: the run finished but retrieved
+                # nothing, so the report is unsourced by construction.
+                complete_detail += " — UNSOURCED (no evidence retrieved)"
+            _notify_stage(5, complete_detail)
             from memory.save_report import render_markdown as _render_markdown
 
             final_answer = _render_markdown(report)
