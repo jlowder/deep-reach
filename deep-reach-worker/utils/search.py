@@ -20,6 +20,8 @@ the query with an empty result list:
 
 import logging
 import os
+import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
@@ -230,8 +232,67 @@ def get_search_tool() -> SearchTool:
     return TavilySearchTool()
 
 
+# --- inter-query pacing (throttling-safe: NEVER retries) ---
+# SearXNG engines return empty results while CAPTCHAs/rate-limits are in
+# effect, and those limits are temporary and correlate with query RATE.
+# The user constraint is explicit: no retries (retrying a throttled engine
+# makes it worse). The only client-side lever is PACE: space queries apart.
+# Enforced at the web_search() level — the single funnel every caller in
+# the worker goes through (retriever round loop + tool-call loop, both
+# strictly sequential), so one timestamp paces all web queries of a run.
+
+_throttle_lock = threading.Lock()
+_last_query_ts: float = time.monotonic()  # import time counts as "a query
+# just ran": a long-lived server's first real query sleeps ~0; a fresh CLI
+# process sleeps at most one interval before its first query.
+
+
+def get_throttle_ms() -> int:
+    """Inter-query pacing interval in ms from SEARCH_THROTTLE_MS.
+
+    Default 1000. 0 (or unparseable → default; negative → 0) disables.
+    Read per call so config changes take effect without a restart.
+    """
+    raw = os.getenv("SEARCH_THROTTLE_MS", "1000")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 1000
+
+
+def pace_next_query(now: Optional[float] = None) -> float:
+    """Sleep until the pacing interval has elapsed since the last query.
+
+    Sleeps max(0, interval − time_since_last_query); a fresh process's
+    first call sleeps ~0 (the timestamp starts at import time). Never
+    retries, never raises — a pacing hiccup must not fail a run. Returns
+    the seconds actually waited. `now` (monotonic seconds) is injectable
+    for tests (pair with a patched time.sleep).
+    """
+    global _last_query_ts
+    interval = get_throttle_ms() / 1000.0
+    if interval <= 0:
+        return 0.0
+    with _throttle_lock:
+        t = time.monotonic() if now is None else float(now)
+        wait = interval - (t - _last_query_ts)
+        if wait <= 0.0:
+            _last_query_ts = t
+            return 0.0
+        time.sleep(wait)
+        _last_query_ts = t + wait
+    return wait
+
+
 def web_search(query: str, num_results: int = 5) -> Dict[str, Any]:
-    """Config-selected web search. Never raises; returns empty results on error."""
+    """Config-selected web search.
+
+    Paces the call (SEARCH_THROTTLE_MS) so engine rate limits — temporary
+    and rate-correlated — stay out of effect. Never raises; returns empty
+    results on error and never retries (retrying a throttled engine makes
+    it worse; pacing is the fix).
+    """
+    pace_next_query()
     out = get_search_tool().search(query, num_results)
     if out.get("results"):
         _warned.clear()  # backend answered: config failures may warn again later

@@ -497,6 +497,10 @@ TAVILY_API_KEY=your_tavily_api_key_here
 SEARCH_TOOL=tavily
 # SearXNG base URL (used when SEARCH_TOOL=searxng)
 SEARXNG_URL=http://localhost:8081
+# Inter-query pacing in milliseconds for web search (default 1000; 0 disables).
+# Throttling-safe policy: queries are spaced, NEVER retried — engine rate
+# limits are temporary and rate-correlated, so retrying makes them worse.
+SEARCH_THROTTLE_MS=1000
 '''
 
 

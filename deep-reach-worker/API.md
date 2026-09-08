@@ -292,6 +292,7 @@ curl -s -X POST -H 'content-type: application/json' -d @report.json \
 
 ## Notes
 
+- Web search pacing: `SEARCH_THROTTLE_MS` (default `1000`; `0` disables) spaces web queries so engine rate limits stay out of effect. The policy is pace, never retry — a throttled engine is paced, not retried.
 - No authentication: bind to localhost or put the service behind an authenticating proxy.
 - Permissive CORS is enabled (Access-Control-Allow-Origin: *, all methods/headers) so browser-based clients (e.g. HTML API testers, web front-ends) work out of the box; it is permissive on purpose — put the service behind a proxy/restrict origins if exposed to untrusted networks.
 - Tests: `venv/bin/python -m pytest tests/ -q`. `tests/test_api_server.py` covers the full task lifecycle with a fake run function (fully offline) plus one end-to-end test that runs the real pipeline with every LLM/retrieval surface stubbed.

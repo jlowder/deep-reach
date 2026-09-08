@@ -45,6 +45,7 @@ The backend is selected in `utils/var.env` (see `.env.example`):
 
 - `SEARCH_TOOL=tavily` (default) — the Tavily API; requires `TAVILY_API_KEY`.
 - `SEARCH_TOOL=searxng` — a local SearXNG meta-search instance; requires no API key/quota. Set `SEARXNG_URL` to its base URL (default `http://localhost:8081`).
+- `SEARCH_THROTTLE_MS` (default `1000`; `0` disables) — inter-query pacing for web search: each query is spaced at least this far from the previous one. Policy is **pace, never retry**: engine rate limits are temporary and correlate with query rate, so retrying a throttled engine makes it worse.
 
 Both backends return the same result shape and never raise — on any error the
 retriever simply gets zero web results. SearXNG must be configured to allow
