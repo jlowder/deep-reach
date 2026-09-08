@@ -172,7 +172,7 @@ def default_run_fn(topic: str, **budgets: Any) -> dict:
 
 def create_app(
     run_fn: Optional[Callable[..., dict]] = None,
-    max_run_seconds: float = 45 * 60,
+    max_run_seconds: float = 120 * 60,
 ) -> FastAPI:
     """Build the API app.
 
