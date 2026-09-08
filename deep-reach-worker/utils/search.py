@@ -20,6 +20,8 @@ the query with an empty result list:
 
 import logging
 import os
+import threading
+import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
@@ -30,6 +32,22 @@ import requests
 import utils.config  # noqa: F401
 
 logger = logging.getLogger(__name__)
+
+# Config-failure categories already warned about in this process. A dead
+# backend is retried by every sub-question round, so repeats would spam the
+# log; web_search() clears the set on a non-empty result, so a
+# recovered-then-broken configuration warns again instead of going silent.
+_warned: set[str] = set()
+
+
+def _warn_once(category: str, msg: str, *args: Any) -> None:
+    """Emit a config-failure warning once per failure state; repeats at
+    debug. Never raises."""
+    if category in _warned:
+        logger.debug(msg, *args)
+    else:
+        _warned.add(category)
+        logger.warning(msg, *args)
 
 # Maximum characters to retain per result content. Tavily can return 3-15KB
 # of raw HTML/Markdown per result; cap it so accumulated results across
@@ -97,10 +115,11 @@ class TavilySearchTool(SearchTool):
             self._client_built = True
             api_key = os.getenv("TAVILY_API_KEY")
             if not api_key:
-                logger.warning(
+                _warn_once(
+                    "tavily:no-key",
                     "SEARCH_TOOL=tavily but TAVILY_API_KEY is not set; web "
                     "search will return no results. Set the key or switch to "
-                    "SEARCH_TOOL=searxng."
+                    "SEARCH_TOOL=searxng.",
                 )
             else:
                 # Local import: module import must not require the SDK.
@@ -124,7 +143,7 @@ class TavilySearchTool(SearchTool):
             )
             results = result.get("results", [])
         except Exception as e:
-            logger.warning("Tavily search failed for %r: %s", query, e)
+            _warn_once("tavily:error", "Tavily search failed for %r: %s", query, e)
             return {"query": query, "results": []}
         return {"query": query, "results": [_whitelist_result(r) for r in results]}
 
@@ -153,11 +172,17 @@ class SearxngSearchTool(SearchTool):
                 timeout=30,
             )
         except Exception as e:
-            logger.warning("SearXNG request to %s failed: %s", self.base_url, e)
+            _warn_once(
+                "searxng:unreachable",
+                "SearXNG request to %s failed: %s",
+                self.base_url,
+                e,
+            )
             return {"query": query, "results": []}
 
         if resp.status_code != 200:
-            logger.warning(
+            _warn_once(
+                f"searxng:http-{resp.status_code}",
                 "SearXNG at %s returned HTTP %s — if the body says the json "
                 "format is not enabled, add '- json' under 'search: formats:' "
                 "in SearXNG's settings.yml.",
@@ -169,7 +194,8 @@ class SearxngSearchTool(SearchTool):
         try:
             data = resp.json()
         except Exception as e:
-            logger.warning(
+            _warn_once(
+                "searxng:not-json",
                 "SearXNG at %s returned a non-JSON body (HTML?): %s — enable "
                 "the json format in settings.yml (search: formats: [html, json]).",
                 self.base_url,
@@ -197,7 +223,8 @@ def get_search_tool() -> SearchTool:
     if tool == "searxng":
         return SearxngSearchTool()
     if tool != "tavily":
-        logger.warning(
+        _warn_once(
+            f"unknown-tool:{tool}",
             "Unknown SEARCH_TOOL %r (expected 'tavily' or 'searxng'); "
             "falling back to tavily.",
             tool,
@@ -205,6 +232,68 @@ def get_search_tool() -> SearchTool:
     return TavilySearchTool()
 
 
+# --- inter-query pacing (throttling-safe: NEVER retries) ---
+# SearXNG engines return empty results while CAPTCHAs/rate-limits are in
+# effect, and those limits are temporary and correlate with query RATE.
+# The user constraint is explicit: no retries (retrying a throttled engine
+# makes it worse). The only client-side lever is PACE: space queries apart.
+# Enforced at the web_search() level — the single funnel every caller in
+# the worker goes through (retriever round loop + tool-call loop, both
+# strictly sequential), so one timestamp paces all web queries of a run.
+
+_throttle_lock = threading.Lock()
+_last_query_ts: float = time.monotonic()  # import time counts as "a query
+# just ran": a long-lived server's first real query sleeps ~0; a fresh CLI
+# process sleeps at most one interval before its first query.
+
+
+def get_throttle_ms() -> int:
+    """Inter-query pacing interval in ms from SEARCH_THROTTLE_MS.
+
+    Default 1000. 0 (or unparseable → default; negative → 0) disables.
+    Read per call so config changes take effect without a restart.
+    """
+    raw = os.getenv("SEARCH_THROTTLE_MS", "1000")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 1000
+
+
+def pace_next_query(now: Optional[float] = None) -> float:
+    """Sleep until the pacing interval has elapsed since the last query.
+
+    Sleeps max(0, interval − time_since_last_query); a fresh process's
+    first call sleeps ~0 (the timestamp starts at import time). Never
+    retries, never raises — a pacing hiccup must not fail a run. Returns
+    the seconds actually waited. `now` (monotonic seconds) is injectable
+    for tests (pair with a patched time.sleep).
+    """
+    global _last_query_ts
+    interval = get_throttle_ms() / 1000.0
+    if interval <= 0:
+        return 0.0
+    with _throttle_lock:
+        t = time.monotonic() if now is None else float(now)
+        wait = interval - (t - _last_query_ts)
+        if wait <= 0.0:
+            _last_query_ts = t
+            return 0.0
+        time.sleep(wait)
+        _last_query_ts = t + wait
+    return wait
+
+
 def web_search(query: str, num_results: int = 5) -> Dict[str, Any]:
-    """Config-selected web search. Never raises; returns empty results on error."""
-    return get_search_tool().search(query, num_results)
+    """Config-selected web search.
+
+    Paces the call (SEARCH_THROTTLE_MS) so engine rate limits — temporary
+    and rate-correlated — stay out of effect. Never raises; returns empty
+    results on error and never retries (retrying a throttled engine makes
+    it worse; pacing is the fix).
+    """
+    pace_next_query()
+    out = get_search_tool().search(query, num_results)
+    if out.get("results"):
+        _warned.clear()  # backend answered: config failures may warn again later
+    return out

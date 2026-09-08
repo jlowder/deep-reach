@@ -112,6 +112,15 @@ def purge_stale(ttl_days: int) -> None:
         _delete_stale(conn, ttl_days)
 
 
+# True when a pack carries no reusable evidence at all: zero doc chunks AND
+# zero web results (tolerates the missing/empty-dict forms of either side).
+def evidence_pack_empty(evidence_pack: dict | None) -> bool:
+    pack = evidence_pack or {}
+    docs = pack.get("document_evidence") or {}
+    web = pack.get("web_evidence") or {}
+    return not (docs.get("chunks") or web.get("results"))
+
+
 # drop every cached evidence pack (whole table) and return the rowcount.
 # Called at ingest entry points when the corpus was reconciled away, so
 # stale-document packs can't be reused for a new corpus.
@@ -131,6 +140,11 @@ def save_evidence(
 ) -> None:
     sub_topic = normalize_question(question)
     if not session_id or not sub_topic:
+        return
+    if evidence_pack_empty(evidence_pack):
+        # A zero-evidence pack (failed/empty retrieval) is never saved: a
+        # failed run must not poison cross-session replays with an empty
+        # pack that a later, healthy run would reuse.
         return
     with get_evidence_cache_connection() as conn:
         _lazy_purge_once(conn, ttl_days)
@@ -194,8 +208,13 @@ def lookup_evidence_detail(question: str, ttl_days: int) -> dict | None:
             best_score = score
     if best is None:
         return None
+    evidence = json.loads(best["evidence_json"])
+    if evidence_pack_empty(evidence):
+        # Rows written before the save-side guard (or by other writers) can
+        # still hold zero packs; a cache hit must carry real evidence.
+        return None
     return {
-        "evidence": json.loads(best["evidence_json"]),
+        "evidence": evidence,
         "jaccard": best_score,
         "question": best["question"],
         "retrieved_at": best["retrieved_at"],

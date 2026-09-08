@@ -687,6 +687,35 @@ def test_section_markdown_prompt_teaches_math(monkeypatch):
     assert "ⁿ" in instr
 
 
+def _flat(instr: str) -> str:
+    """Whitespace-normalize a prompt (the constants wrap mid-phrase, so
+    substring asserts must not depend on the source line breaks)."""
+    return " ".join(instr.split())
+
+
+def test_zero_evidence_branch_in_section_json_prompt():
+    instr = _flat(wmod.WRITE_SECTION_JSON_INSTRUCTIONS)
+    assert "Attach point citations to every factual sentence that the provided" in instr
+    assert "If the Evidence block is empty" in instr
+    assert "attach NO citations" in instr
+    assert "citation_note" in instr
+    assert "NEVER invent a key" in instr  # never-invent survives the softening
+
+
+def test_zero_evidence_branch_in_section_markdown_prompt():
+    instr = _flat(wmod.WRITE_SECTION_INSTRUCTIONS)
+    assert "If the Evidence block is empty" in instr
+    assert "attach NO citations" in instr
+    assert "NEVER invent a key" in instr
+
+
+def test_zero_evidence_branch_in_report_json_prompt():
+    instr = _flat(wmod.WRITE_REPORT_JSON_INSTRUCTIONS)
+    assert "If the Evidence block is empty" in instr
+    assert "attach NO citations" in instr
+    assert "NEVER invent a key" in instr
+
+
 def test_writer_markdown_prompt_teaches_math(monkeypatch):
     calls = _patch_run_model(monkeypatch, "# T\n\nBody [D1].")
     wmod.writer_agent(user_query="q", evidence_text="[D1] E.", output_format="markdown")

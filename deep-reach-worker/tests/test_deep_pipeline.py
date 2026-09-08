@@ -1122,3 +1122,86 @@ def test_must_revise_short_json_section_even_when_critic_all_pass(monkeypatch):
     assert len(revisions) == 2
     assert result["stats"]["revisions"] == 2
     assert "Revised substantive draft." in result["final_answer"]
+
+
+# ---------------------------------------------------------------------------
+# Scenario — investigate-stage observability (zero-evidence diagnostics)
+# ---------------------------------------------------------------------------
+
+def test_investigate_zero_evidence_emits_diagnostic_steps(monkeypatch):
+    env = _basic_env()
+    env["web_results"] = lambda query: []  # the search backend returns nothing
+    _install_stubs(monkeypatch, env)
+    steps = []
+    dpo.deep_research(
+        "test research query",
+        verbose=False,
+        max_rounds=3,
+        budget_web=2,
+        output_format="markdown",
+        on_stage=lambda n, d: steps.append((n, d)),
+    )
+    details = [d for n, d in steps if n == 2]
+    assert any("no evidence retrieved for sub-question 1/2" in d for d in details)
+    assert any("no evidence retrieved for sub-question 2/2" in d for d in details)
+    assert any("web search returned no results" in d for d in details)
+
+
+def test_investigate_healthy_run_emits_no_diagnostic_steps(monkeypatch):
+    # _basic_env's default web results are non-empty for every query →
+    # the diagnostic lines must stay silent (no noise on healthy runs).
+    env = _basic_env()
+    _install_stubs(monkeypatch, env)
+    steps = []
+    dpo.deep_research(
+        "test research query",
+        verbose=False,
+        max_rounds=3,
+        budget_web=2,
+        output_format="markdown",
+        on_stage=lambda n, d: steps.append((n, d)),
+    )
+    details = [d for n, d in steps if n == 2]
+    assert not any("no evidence retrieved" in d for d in details)
+    assert not any("web search returned no results" in d for d in details)
+
+
+def test_complete_step_is_marked_unsourced_when_no_evidence(monkeypatch):
+    env = _basic_env()
+    env["web_results"] = lambda query: []
+
+    def unsourced_writer(i, k):
+        # Contract-compliant section, zero citations (the evidence is empty).
+        return json.dumps(
+            {
+                "id": f"section-{i + 1}",
+                "heading": f"Section {i + 1}",
+                "blocks": [
+                    {
+                        "type": "paragraph",
+                        "spans": [
+                            {
+                                "text": "Body. "
+                                + " ".join(f"w{j}" for j in range(310)),
+                                "citations": [],
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+    env["writer_text"] = unsourced_writer
+    _install_stubs(monkeypatch, env)
+    steps = []
+    dpo.deep_research(
+        "test research query",
+        verbose=False,
+        max_rounds=3,
+        budget_web=2,
+        output_format="json",
+        on_stage=lambda n, d: steps.append((n, d)),
+    )
+    final = [d for n, d in steps if n == 5][-1]
+    assert final.startswith("complete (structured): 2 section(s), 0 source(s)")
+    assert final.endswith("— UNSOURCED (no evidence retrieved)")

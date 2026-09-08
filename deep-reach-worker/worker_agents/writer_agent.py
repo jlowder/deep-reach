@@ -296,15 +296,22 @@ CONTRACT — all of these are mandatory:
    comparisons, and examples grounded in the evidence for THIS section —
    not filler. Keep the section between about 300 and 1100 words of
    substance.
-2. Cite every factual sentence with a key that is ACTUALLY PROVIDED in the
-   evidence for this section: every factual sentence is one containing a
-   claim, name, number, date, or specific finding. Density target for this
-   section: at least 4 citations per 100 words; reusing the same key in
-   multiple sentences is correct and expected. NEVER invent a key that is
+2. Attach point citations to every factual sentence that the provided
+   evidence supports, using a key that is ACTUALLY PROVIDED in the evidence
+   for this section: every factual sentence is one containing a claim,
+   name, number, date, or specific finding. Density target for this
+   section: at least 4 citations per 100 words of evidence-supported prose;
+   reusing the same key in multiple sentences is correct and expected. NEVER
+   invent a key that is
    not present in this section's evidence. Each key goes at the end of the
    sentence it supports. In prose (including citation notes), refer to
    sources by their title or subject — NEVER by registry key (W1, D2, …);
-   keys belong only in the citations field.
+   keys belong only in the citations field. If the Evidence block is empty:
+   attach NO citations (the density target does not apply — never invent
+   keys to satisfy it) and include one `citation_note` block stating briefly
+   that no source material was available for this section and that its claims
+   rest on established background knowledge. Do not apologize or discuss the
+   citation policy beyond that note.
 3. Output EXACTLY ONE JSON object — no Markdown, no code fences, no
    commentary. Shape: {"id": "<lowercase-hyphen slug of the section
    heading>", "heading": "<the exact section heading provided in the input>",
@@ -420,11 +427,17 @@ CONTRACT — all of these are mandatory:
 5. Per-sentence spans: split each paragraph into spans so the span that ends
    a cited sentence carries that sentence's citation keys; uncited
    transition spans get citations [].
-6. Cite every factual sentence with a key that is ACTUALLY PROVIDED in the
-   evidence. Density target: at least 4 citations per 100 words; reusing the
-   same key in multiple sentences is correct and expected. NEVER invent a
+6. Attach point citations to every factual sentence that the provided
+   evidence supports, with a key that is ACTUALLY PROVIDED in the
+   evidence. Density target: at least 4 citations per 100 words of
+   evidence-supported prose; reusing the same key in multiple sentences is
+   correct and expected. NEVER invent a
    key that is not present in the evidence. Quantitative claims must always
-   carry a citation.
+   carry a citation. If the Evidence block is empty: attach NO citations
+   (the density target does not apply) and state briefly in the prose that
+   no source material was available for this section and that its claims
+   rest on established background knowledge — do not apologize or discuss
+   the citation policy.
 7. Fully explain every concept (how it works, why, formulation, practical
    implications); include mathematical formulas, architectural details,
    quantitative comparisons, and specific examples from the evidence.
@@ -593,15 +606,21 @@ You are writing ONE section of a deep-research report. You will be given:
 CONTRACT — all of these are mandatory:
 1. Write at least 300 words of substance: concrete facts, mechanisms,
    comparisons, and examples grounded in the evidence — not filler.
-2. Cite every factual sentence with a key that is ACTUALLY PROVIDED in the
+2. Attach point citations to every factual sentence that the provided
+   evidence supports, with a key ACTUALLY PROVIDED in the
    evidence for this section (e.g. "[D1]", "[D1, W2]") at the end of the
    sentence it supports: every factual sentence is one containing a claim,
    name, number, date, or specific finding. Density target for this
-   section: at least 4 citations per 100 words; reusing the same key in
-   multiple sentences is correct and expected. NEVER invent a key that is
+   section: at least 4 citations per 100 words of evidence-supported prose;
+   reusing the same key in multiple sentences is correct and expected.
+   NEVER invent a key that is
    not present in this section's evidence. When a sentence cannot be cited
    (pure synthesis or transition) — keep such sentences to a
-   minority of the section.
+   minority of the section. If the Evidence block is empty: attach NO
+   citations (the density target does not apply) and state briefly that no
+   source material was available for this section and that its claims rest
+   on established background knowledge — do not apologize or discuss the
+   citation policy.
 3. Include at least 2 concrete specifics (named works, named researchers,
    numbers, dates) whenever the evidence supports them. Quantitative claims
    (numbers, dates, named results) must always carry a citation.

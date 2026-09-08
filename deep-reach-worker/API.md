@@ -59,6 +59,9 @@ Body:
   "task_id": "4bd2c028651a4d8091088b48aa14186d",
   "status": "running",
   "current_step": "queued",
+  "max_rounds": 3,
+  "budget_doc": 10,
+  "budget_web": 5,
   "documents": ["alpha.pdf"],
   "links": {
     "status": "/research/4bd2c028651a4d8091088b48aa14186d",
@@ -83,6 +86,9 @@ Other responses:
       "topic": "What is a vector field",
       "status": "running",
       "current_step": "draft: drafting 1 section(s)",
+      "max_rounds": 3,
+      "budget_doc": 10,
+      "budget_web": 5,
       "step_count": 5,
       "started_at": 1788272018.03,
       "finished_at": null,
@@ -107,10 +113,27 @@ Other responses:
   ],
   "started_at": 1788272018.03,
   "finished_at": 1788272243.33,
+  "max_rounds": 3,
+  "budget_doc": 10,
+  "budget_web": 5,
   "stats": {"llm_calls": 5, "wall_s": 225.3, "sections": 1, "revisions": 1},
+  "quality": {
+    "citation_density": {"overall": 0.42, "per_section": {"<heading>": 0.5}},
+    "verification": {
+      "confidence": "medium",
+      "coverage": "moderate",
+      "gaps": [],
+      "unresolvable_citations": ["D2"],
+      "dropped_bare_citations": ["7"]
+    },
+    "sources_count": {"documents": 1, "web": 3},
+    "total_words": 1834
+  },
   "documents": ["alpha.pdf"]
 }
 ```
+
+`max_rounds` / `budget_doc` / `budget_web` are the requested budgets, stored on the record at creation (same defaults as the POST body: 3 / 10 / 5) so a finished run can be diagnosed against the parameters it ran with. `stats` is present only after the run produced a result; `quality` is present only for completed structured (json) runs — it is the `quality` object from the report envelope, computed at assembly, with: `citation_density` (`overall` 0–1 plus `per_section`), `verification` (`confidence`, `coverage`, `gaps`, `unresolvable_citations` — keys cited in the body but absent from the source registry, `dropped_bare_citations` — bare numbers removed), `sources_count` (`documents` / `web`), and `total_words`.
 
 404, unknown id: `{"error": "unknown task: <id>"}`
 
@@ -269,6 +292,7 @@ curl -s -X POST -H 'content-type: application/json' -d @report.json \
 
 ## Notes
 
+- Web search pacing: `SEARCH_THROTTLE_MS` (default `1000`; `0` disables) spaces web queries so engine rate limits stay out of effect. The policy is pace, never retry — a throttled engine is paced, not retried.
 - No authentication: bind to localhost or put the service behind an authenticating proxy.
 - Permissive CORS is enabled (Access-Control-Allow-Origin: *, all methods/headers) so browser-based clients (e.g. HTML API testers, web front-ends) work out of the box; it is permissive on purpose — put the service behind a proxy/restrict origins if exposed to untrusted networks.
 - Tests: `venv/bin/python -m pytest tests/ -q`. `tests/test_api_server.py` covers the full task lifecycle with a fake run function (fully offline) plus one end-to-end test that runs the real pipeline with every LLM/retrieval surface stubbed.
