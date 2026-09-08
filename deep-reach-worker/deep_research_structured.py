@@ -475,6 +475,77 @@ def _promote_bare_equation_spans(report: ResearchReport) -> int:
     return promoted
 
 
+# Bare registry keys as they appear in prose: W1..Wn (web), D1..Dn (docs).
+_SOURCE_KEY_RE = re.compile(r"\b(?:W|D)\d+\b")
+
+
+def _rewrite_prose_source_keys(report: ResearchReport, registry: dict) -> int:
+    """Resolve bare registry keys in citation-note/callout span prose to the
+    source title they refer to.
+
+    The writer is told never to echo a registry key in prose, but its
+    evidence view shows sources as ``[W1] {title} ({url}, {date})`` so a
+    model may still write e.g. "keyed to the report source W1". The
+    bibliography prints positional ``[1]..[n]`` and never the key, so a bare
+    key in prose resolves to nothing for the reader (real task 0992eb85:
+    dangling "W1" in a Sources callout). Substituting the title fixes the
+    dangling reference deterministically.
+
+    Scope: span TEXT of ``citation_note`` and ``callout`` blocks only.
+    Keys absent from the registry are left untouched (never guess); a key
+    whose registry entry has no title is left untouched; a key whose title
+    itself contains a key that resolves to a DIFFERENT title is left
+    untouched (substituting it would cascade on a second pass — keeps the
+    rewrite idempotent); ``citations`` arrays, code, and equation spans are
+    never modified. Returns the number of spans rewritten. Never raises.
+    """
+    rewritten = 0
+    try:
+        for si, section in enumerate(report.report.sections or []):
+            for bi, block in enumerate(section.blocks or []):
+                if block.type not in (
+                    BlockType.citation_note,
+                    BlockType.callout,
+                    "citation_note",
+                    "callout",
+                ):
+                    continue
+                for span in block.spans or []:
+                    text = span.text or ""
+                    if not text:
+                        continue
+                    stripped = text.lstrip()
+                    if stripped.startswith(("$", "\\[", "\\(")):
+                        continue  # equation span: never touch equation text
+                    if not _SOURCE_KEY_RE.search(text):
+                        continue
+
+                    def repl(m: re.Match) -> str:
+                        entry = (registry or {}).get(m.group(0))
+                        title = (entry or {}).get("title") or ""
+                        if not title.strip():
+                            return m.group(0)  # no title: leave the key
+                        for tm in _SOURCE_KEY_RE.finditer(title):
+                            te = (registry or {}).get(tm.group(0))
+                            tt = (te or {}).get("title") or ""
+                            if tt.strip() and tt != title:
+                                return m.group(0)  # idempotency guard
+                        return title
+
+                    new = _SOURCE_KEY_RE.sub(repl, text)
+                    if new != text:
+                        span.text = new
+                        rewritten += 1
+                        logger.debug(
+                            "resolved bare source key(s) in citation prose: "
+                            "section %d block %d %r -> %r",
+                            si, bi, _snip(text, 60), _snip(new, 60),
+                        )
+    except Exception:
+        logger.exception("prose source-key rewrite failed; continuing unrewritten")
+    return rewritten
+
+
 def assemble_structured_report(
     *,
     sections: list,
@@ -495,9 +566,12 @@ def assemble_structured_report(
     Source records (plan §8.1), then renumber citation arrays and rewrite
     [D#]/[W#] text markers onto those final records (plan §6.3 — positions
     are 1-based into the deduped array, so they never go out of range),
-    drop sub-heading blocks with no content zone, promote undelimited
+    drop sub-heading blocks with no content zone, resolve bare registry keys
+    in citation-note/callout prose to source titles (the bibliography never
+    prints keys, so a prose key would dangle), promote undelimited
     display-equation spans to equation blocks, wrap undelimited inline LaTeX
-    runs in prose spans with $...$, normalize
+    runs in prose spans with $...$, balance unmatched closing braces in
+    equation block bodies, normalize
     comparison_table row widths to the header, and compute quality metrics.
     `evidence_json` is accepted for interface stability and reserved for
     future provenance fields.
@@ -535,8 +609,10 @@ def assemble_structured_report(
     report.report.sources = [Source.model_validate(d) for d in source_dicts]
 
     _remap_citations_to_final_sources(report, registry)
+    _rewrite_prose_source_keys(report, registry)
     _promote_bare_equation_spans(report)
     _wrap_undelimited_latex(report)
+    _balance_equation_bodies(report)
     _normalize_comparison_table_widths(report)
 
     report.quality.citation_density = compute_citation_density(report)
@@ -1105,6 +1181,13 @@ def _wrap_undelimited_latex(report: ResearchReport) -> int:
                         )
                         target.text = healed
                         changed += 1
+                # Equation block bodies are intentional display math — the
+                # run detector splits on operators and partial-wraps them
+                # ($\dfrac{F}{p$) in a loop that duplicates the tail, so
+                # equation bodies must not enter this pass at all. Their
+                # hygiene is _balance_equation_bodies' job (splice after).
+                if block.type in (BlockType.equation, "equation"):
+                    continue
                 new, k = _wrap_latex_in_text(block.text or "")
                 if k:
                     logger.warning(
@@ -1124,6 +1207,89 @@ def _wrap_undelimited_latex(report: ResearchReport) -> int:
                     )
                     block.text = healed
                     changed += 1
+    except Exception:
+        pass
+    return changed
+
+
+def _balance_equation_braces(text: str) -> str:
+    """Drop closing braces that have no matching opener.
+
+    A single left-to-right pass tracking brace depth: any '}' that would
+    take the depth negative is an unmatched closer (the classic LLM typo —
+    real task 427f039f shipped 'Q^* = \\dfrac{F}{p - c} - c}', which became
+    'Q^* = \\dfrac{F}{p - c} - c') and is dropped. Everything else is kept
+    byte-identical: no closers are ever added, unmatched OPENERS are left
+    untouched (no guessing), and an already-balanced input round-trips to
+    itself. Never raises.
+    """
+    if not text or "}" not in text:
+        return text
+    out = []
+    depth = 0
+    changed = False
+    for ch in text:
+        if ch == "{":
+            depth += 1
+            out.append(ch)
+        elif ch == "}":
+            if depth == 0:
+                changed = True
+                continue  # unmatched closer — drop it
+            depth -= 1
+            out.append(ch)
+        else:
+            out.append(ch)
+    return "".join(out) if changed else text
+
+
+def _balance_equation_bodies(report: ResearchReport) -> int:
+    """Balance unmatched closing braces in every equation block body.
+
+    Equation blocks are typeset verbatim by the renderer — they carry no
+    $..$ delimiters, so _heal_malformed_math_regions skips them entirely
+    (its first guard bails when the text has no '$'). A stray unmatched
+    closing brace therefore reaches KaTeX, which throws and the renderer
+    falls back to printing the raw source in the PDF.
+
+    Walks the same scopes _wrap_undelimited_latex walks (spans/items/table
+    cells/block text) and applies _balance_equation_braces to the .text of
+    anything equation-typed whose language is latex/tex (case-insensitive;
+    an empty language defaults to math — the block type says equation).
+    Spans carry no type field, so in practice this is block.text of
+    equation blocks. Bodies containing '$' are skipped (already
+    delimiter-managed by the wrap/heal passes). Only rewrites on actual
+    change. Returns the number of modified texts; never raises.
+    """
+    changed = 0
+    try:
+        for section in report.report.sections or []:
+            for block in section.blocks or []:
+                targets = [
+                    block,
+                    *(block.spans or []),
+                    *(block.items or []),
+                    *(c for row in (block.rows or []) for c in (row or [])),
+                ]
+                for target in targets:
+                    btype = getattr(target, "type", None)
+                    if btype is None or btype not in (BlockType.equation, "equation"):
+                        continue
+                    lang = str(getattr(target, "language", "") or "").strip().lower()
+                    if lang not in ("latex", "tex", ""):
+                        continue
+                    old = target.text or ""
+                    if not old or "$" in old:
+                        continue
+                    new = _balance_equation_braces(old)
+                    if new != old:
+                        logger.warning(
+                            "balanced unmatched closing brace(s) in equation body (before: %s | after: %s)",
+                            _snip(old, 60),
+                            _snip(new, 60),
+                        )
+                        target.text = new
+                        changed += 1
     except Exception:
         pass
     return changed

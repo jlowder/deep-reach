@@ -302,7 +302,9 @@ CONTRACT — all of these are mandatory:
    section: at least 4 citations per 100 words; reusing the same key in
    multiple sentences is correct and expected. NEVER invent a key that is
    not present in this section's evidence. Each key goes at the end of the
-   sentence it supports.
+   sentence it supports. In prose (including citation notes), refer to
+   sources by their title or subject — NEVER by registry key (W1, D2, …);
+   keys belong only in the citations field.
 3. Output EXACTLY ONE JSON object — no Markdown, no code fences, no
    commentary. Shape: {"id": "<lowercase-hyphen slug of the section
    heading>", "heading": "<the exact section heading provided in the input>",

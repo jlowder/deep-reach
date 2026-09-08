@@ -340,6 +340,13 @@ code {
   margin-right: 5pt;
 }
 
+.ref-key {
+  font-family: var(--mono, monospace);
+  color: var(--ink-soft);
+  font-size: 0.85em;
+  margin-right: 5pt;
+}
+
 .ref-title {
   font-weight: 600;
 }

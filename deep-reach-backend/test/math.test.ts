@@ -270,7 +270,7 @@ test("equation block with inline $ (undelimited) -> display math, no literal $",
   assert.deepEqual(warnings, [], "clean equation must not warn");
 });
 
-test("equation block still malformed after $-strip -> plain-text fallback, no scary warning", () => {
+test("equation block still malformed after $-strip -> plain-text fallback, surfaced warning (not a KaTeX parse error)", () => {
   const f = tempFile(
     "eq-still-bad.json",
     docWith({ type: "equation", text: "$\\sum_{j} V_{" }),
@@ -279,10 +279,14 @@ test("equation block still malformed after $-strip -> plain-text fallback, no sc
   assert.ok(html.includes('class="math-fallback"'), "gate degrades the malformed equation to plain text");
   assert.ok(html.includes("\\sum_{j} V_{"), "raw tex visible in the fallback");
   assert.equal(katexCount(html), 0, "no KaTeX output");
-  assert.deepEqual(warnings, [], "no scary warning");
+  assert.deepEqual(
+    warnings,
+    ["math fallback: unbalanced braces in equation — showing raw LaTeX"],
+    "the equation gate fallback is surfaced as a plain diagnostic, never a KaTeX parse error",
+  );
 });
 
-test("code_block language latex typesets as display; malformed falls back silently; other langs unchanged", () => {
+test("code_block language latex typesets as display; malformed falls back with surfaced warning; other langs unchanged", () => {
   const f = tempFile(
     "latex-code.json",
     docWith([
@@ -295,7 +299,11 @@ test("code_block language latex typesets as display; malformed falls back silent
   assert.equal(displayCount(html), 1, "valid latex block typesets as a display equation");
   assert.ok(html.includes('class="equation"'), "latex block renders in the equation container");
   assert.equal((html.match(/class="math-fallback"/g) ?? []).length, 1, "malformed latex block falls back");
-  assert.deepEqual(warnings, [], "structurally malformed block degrades silently (gate)");
+  assert.deepEqual(
+    warnings,
+    ["math fallback: unbalanced braces in equation — showing raw LaTeX"],
+    "the malformed latex block (typeset as a display equation) surfaces the gate fallback",
+  );
   assert.ok(
     html.includes('<pre class="language-python"><code>print(1)</code></pre>'),
     "non-latex code blocks must be unchanged",
