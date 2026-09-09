@@ -607,8 +607,14 @@ def _fix_citation_segment(segment: str, title_map: dict, counts: dict) -> str:
     segment = _BRACKET_GROUP_RE.sub(_title_repl, segment)
 
     # (c) remove empty / whitespace-only bracket pairs ("[]", "[ ]")
+    # When the pair sits at the very start of the segment, its trailing
+    # space would survive as a leading space — drop it.
+    pre = segment
     segment, n = _EMPTY_BRACKET_RE.subn("", segment)
-    counts["empty_brackets_removed"] += n
+    if n:
+        counts["empty_brackets_removed"] += n
+        if re.match(r"\[\s*\]", pre.lstrip()) and segment[:1] == " ":
+            segment = segment[1:]
     return segment
 
 
