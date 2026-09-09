@@ -25,6 +25,7 @@ Standard mode (orchestrator_agent) is NOT modified.
 
 import importlib
 import json
+import logging
 import re
 import threading
 import time
@@ -69,6 +70,8 @@ from deep_research_structured import (
     parse_exec_summary,
     sections_plain_text,
 )
+
+logger = logging.getLogger(__name__)
 
 # Global LLM call budget for one deep-research run (plan B / P2-3 ≈ 40).
 # Worst-case tracked calls ≈ 45: decompose(1) + sufficiency/investigation
@@ -646,7 +649,11 @@ def deep_research(
                 f"({type(exc).__name__}: {exc}); continuing."
             )
 
-    def _finish(final_answer: str) -> dict:
+    def _finish(final_answer: str, error: Optional[str] = None) -> dict:
+        if error is not None:
+            # The run ended without a report: the API layer finalizes the
+            # record as failed with this message instead of "completed".
+            state["final_error"] = error
         stats["llm_calls"] = budget.count
         stats["wall_s"] = round(time.time() - started, 1)
         stats["sections"] = len(sections)
@@ -681,20 +688,32 @@ def deep_research(
         _notify_stage(1, f"decomposing query: {_shorten(user_query)}")
         if not budget.can_afford(1):
             print("[DEEP] WARNING: LLM budget exhausted before decomposition; nothing to assemble.")
-            return _finish(
+            msg = (
                 "Deep research failed: the LLM call budget was exhausted before "
                 "the query could be decomposed."
             )
+            return _finish(msg, error=msg)
         plan = decompose_query(
             user_query, catalog, verbose=verbose, endpoint=endpoint, api_key=api_key
         )
         if plan.get("source") == "fallback":
-            # One retry: a garbage structured call lands on the
-            # single-sub-question fallback plan. Keep whichever plan has MORE
-            # sub-questions (on a tie the first); no further retries.
+            # One retry: an unusable structured call (preamble prose,
+            # malformed JSON, or — now that sub_questions has min_length=1 —
+            # a valid-but-empty plan) lands on the single-sub-question
+            # fallback plan. Make the cause visible in the worker log AND the
+            # task step list (on_stage/record_step — a bare _log_stage print
+            # never reached the API step log), then ask the model once more.
+            # Keep whichever plan has MORE sub-questions (on a tie the first);
+            # no further retries.
+            reason = str(plan.get("fallback_reason") or "unusable plan")
+            logger.warning(
+                "[DEEP] decompose: model returned an %s — retrying with fallback",
+                reason,
+            )
             if budget.can_afford(1):
                 if verbose:
                     print("[DEEP] decomposition source=fallback; retrying once")
+                _notify_stage(1, f"model returned an {reason} — retrying with fallback")
                 retry_plan = decompose_query(
                     user_query, catalog, verbose=verbose,
                     endpoint=endpoint, api_key=api_key,
@@ -712,11 +731,12 @@ def deep_research(
         sub_questions = list(plan.get("sub_questions") or [])
         if not sub_questions:
             _log_stage("1 DECOMPOSE", "FAILED (no sub-questions)")
-            return _finish(
+            msg = (
                 "Deep research failed: the query could not be decomposed into "
                 "sub-questions (the decomposer returned an empty plan). Please "
                 "rephrase the request and try again."
             )
+            return _finish(msg, error=msg)
         # Priority order (1 first), stable within a priority.
         sub_questions.sort(key=lambda sq: (int(sq.get("priority") or 3),))
         _log_stage(

@@ -262,7 +262,7 @@ The UI has a **Mode** selector (standard, default / deep). Deep mode runs the 5-
 
 ## API server
 
-The same deep-research pipeline, headless: a FastAPI service (`api_server.py`) that takes a topic over HTTP, tracks the run as a pollable task, and serves the finished report as the structured JSON envelope that paperbot renders to PDF/HTML.
+The same deep-research pipeline, headless: a FastAPI service (`api_server.py`) that takes a topic over HTTP, tracks the run as a pollable task, and serves the finished report as the structured JSON envelope that paperbot renders to PDF/HTML. A run that ends without producing a report is recorded `failed` (the reason in `error`) — never `completed` with a null report — and its `GET /research/{id}/report` answers 409 instead of a bare `null`.
 
 ```bash
 venv/bin/python api_server.py   # PORT (default 8321), HOST (default 0.0.0.0)
@@ -295,7 +295,7 @@ The live env file is `utils/var.env` (gitignored). It is auto-seeded from `.env.
 venv/bin/python -m pytest tests/ -q
 ```
 
-The pytest suite (264 tests) covers the save-report flow, citation context and key renumbering, decomposition (structured and fallback parsing), per-sub-question investigation, the deep pipeline end-to-end, config overrides, and the API service (task lifecycle plus a stubbed end-to-end run). Use the project virtualenv — system Python lacks the project dependencies.
+The pytest suite (488 tests) covers the save-report flow, citation context and key renumbering, decomposition (structured and fallback parsing), per-sub-question investigation, the deep pipeline end-to-end, config overrides, and the API service (task lifecycle plus a stubbed end-to-end run). Use the project virtualenv — system Python lacks the project dependencies.
 
 ## Notes
 

@@ -110,6 +110,40 @@ describe("API server (pdf disabled)", () => {
     assert.equal(res.statusCode, 400);
   });
 
+  // Regression for task 9deb0f48: the worker's /report answered 200 with a
+  // literal `null` for a run that never assembled a report; the glue
+  // forwarded that `null` here and the generic zod message only said
+  // "Expected object, received null". The null root is now named.
+  test("literal null envelope -> 400 naming the upstream cause", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/render?format=html",
+      headers: { "content-type": "application/json" },
+      payload: "null",
+    });
+    assert.equal(res.statusCode, 400);
+    const error = JSON.parse(res.body).error as string;
+    assert.match(error, /document envelope is null/);
+    assert.match(error, /upstream worker produced no report/);
+    assert.doesNotMatch(error, /Expected object/);
+  });
+
+  test("non-null malformed envelopes keep the generic messages", async () => {
+    // an object with neither field: the refine message, unchanged
+    const empty = await app.inject({ method: "POST", url: "/render", payload: {} });
+    assert.equal(empty.statusCode, 400);
+    assert.match(JSON.parse(empty.body).error, /exactly one/);
+    // a JSON array: still rejected by the generic zod object check
+    const arr = await app.inject({
+      method: "POST",
+      url: "/render",
+      headers: { "content-type": "application/json" },
+      payload: "[]",
+    });
+    assert.equal(arr.statusCode, 400);
+    assert.match(JSON.parse(arr.body).error, /Expected object/);
+  });
+
   test("invalid document (missing sections) -> 400 mentioning the issue", async () => {
     const res = await app.inject({
       method: "POST",

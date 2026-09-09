@@ -2,6 +2,9 @@
 
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from worker_agents import decomposition_agent
 from worker_agents.decomposition_agent import (
     ResearchPlan,
@@ -295,3 +298,121 @@ class TestGenerateReportTitle:
         assert seen["max_output_tokens"] == 32
         assert seen["reasoning_effort"] == "low"
         assert seen["agent_name"] == "decomposer"
+
+
+class TestEmptyPlanRegression:
+    """Regression: a *valid* structured ResearchPlan with an EMPTY
+    sub_questions list (task 9deb0f48, Ornith-1.5-35B) must fail validation
+    (min_length=1) and fall through to the single-sub-question fallback plan
+    with source='fallback' — which is what makes the orchestrator's
+    decomposition retry fire. Before the fix it validated fine with
+    source='structured' and the run early-finished with zero sections."""
+
+    QUERY = "What is the efficient market hypothesis?"
+
+    def test_schema_rejects_empty_sub_questions(self):
+        with pytest.raises(ValidationError):
+            ResearchPlan.model_validate({"sub_questions": []})
+        # An omitted key applies the default ([]) and must fail the same way.
+        with pytest.raises(ValidationError):
+            ResearchPlan.model_validate({"is_simple": False})
+        # ...while a single sub-question still validates.
+        plan = ResearchPlan.model_validate(
+            {
+                "is_simple": False,
+                "sub_questions": [
+                    {
+                        "id": "sq1",
+                        "question": "Q?",
+                        "angle": "a",
+                        "expected_sources": "both",
+                        "priority": 3,
+                    }
+                ],
+            }
+        )
+        assert len(plan.sub_questions) == 1
+
+    def test_structured_empty_list_uses_fallback(self, monkeypatch):
+        # 200 OK, well-formed object, zero sub-questions — the exact 9deb
+        # failure shape.
+        monkeypatch.setattr(
+            decomposition_agent,
+            "run_model",
+            lambda **kw: _FakeResponse(
+                parsed={"is_simple": False, "sub_questions": []},
+                output_text="",
+            ),
+        )
+        plan = decompose_query(self.QUERY, [])
+        assert plan["source"] == "fallback"
+        assert plan["fallback_reason"] == "empty plan"
+        assert len(plan["sub_questions"]) == 1
+        assert plan["sub_questions"][0]["question"] == self.QUERY
+
+    def test_structured_omitted_sub_questions_uses_fallback(self, monkeypatch):
+        monkeypatch.setattr(
+            decomposition_agent,
+            "run_model",
+            lambda **kw: _FakeResponse(parsed={"is_simple": False}, output_text=""),
+        )
+        plan = decompose_query(self.QUERY, [])
+        assert plan["source"] == "fallback"
+        assert plan["fallback_reason"] == "empty plan"
+        assert len(plan["sub_questions"]) == 1
+
+    def test_text_json_empty_list_uses_fallback(self, monkeypatch):
+        # No structured output; the raw text carries a JSON object with an
+        # empty list.
+        monkeypatch.setattr(
+            decomposition_agent,
+            "run_model",
+            lambda **kw: _FakeResponse(
+                parsed=None,
+                output_text='{"is_simple": false, "sub_questions": []}',
+            ),
+        )
+        plan = decompose_query(self.QUERY, [])
+        assert plan["source"] == "fallback"
+        assert plan["fallback_reason"] == "empty plan"
+
+    def test_malformed_json_text_uses_fallback_unusable_reason(self, monkeypatch):
+        # The pre-existing garbage path keeps working and is labelled
+        # distinctly from the empty-plan case.
+        monkeypatch.setattr(
+            decomposition_agent,
+            "run_model",
+            lambda **kw: _FakeResponse(
+                parsed=None, output_text="I'm sorry, here is a {"
+            ),
+        )
+        plan = decompose_query(self.QUERY, [])
+        assert plan["source"] == "fallback"
+        assert plan["fallback_reason"] == "unusable plan"
+
+    def test_valid_single_sq_structured_passes_through(self, monkeypatch):
+        # min_length=1 must not over-reject: a one-sub-question plan is a
+        # perfectly good plan.
+        monkeypatch.setattr(
+            decomposition_agent,
+            "run_model",
+            lambda **kw: _FakeResponse(
+                parsed={
+                    "is_simple": True,
+                    "sub_questions": [
+                        {
+                            "id": "sq1",
+                            "question": "When did Fama propose EMH?",
+                            "angle": "history",
+                            "expected_sources": "web",
+                            "priority": 3,
+                        }
+                    ],
+                },
+                output_text="",
+            ),
+        )
+        plan = decompose_query(self.QUERY, [])
+        assert plan["source"] == "structured"
+        assert "fallback_reason" not in plan
+        assert len(plan["sub_questions"]) == 1

@@ -293,6 +293,16 @@ def create_app(
                                     record.quality = q
                             except Exception:
                                 pass  # quality stays None; the artifact is kept
+                        elif error is None:
+                            # The pipeline returned normally but produced no
+                            # report artifact (e.g. the decomposer gave up):
+                            # finalize FAILED, not completed — a "completed"
+                            # record with a null report reads as success to
+                            # every downstream consumer (glue/paperbot/web).
+                            error = (
+                                state.get("final_error")
+                                or "run produced no report"
+                            )
         except Exception as exc:
             # Artifact storage must never wedge the task/queue: record the
             # failure instead of leaving the record stuck "running".
@@ -572,8 +582,22 @@ def create_app(
                     status_code=404, content={"error": f"unknown task: {task_id}"}
                 )
             if t.status != "completed":
-                return JSONResponse(status_code=409, content={"status": t.status})
-            body = t.report_json if t.report_json is not None else "null"
+                body = {"status": t.status}
+                if t.error is not None:
+                    body["error"] = t.error
+                return JSONResponse(status_code=409, content=body)
+            if t.report_json is None:
+                # Never serve a bare `null` 200: a record without a report
+                # artifact has nothing to render downstream (paperbot would
+                # 400 on it).
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": "no report artifact — the run produced no report",
+                        "status": t.status,
+                    },
+                )
+            body = t.report_json
         return Response(content=body, media_type="application/json")
 
     @app.get("/health")
