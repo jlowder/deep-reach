@@ -124,7 +124,8 @@ Other responses:
       "coverage": "moderate",
       "gaps": [],
       "unresolvable_citations": ["D2"],
-      "dropped_bare_citations": ["7"]
+      "dropped_bare_citations": ["7"],
+      "normalized_citations": {"bare_key_rewrites": 2, "adjacent_duplicates_collapsed": 5, "title_brackets_stripped": 3, "empty_brackets_removed": 1}
     },
     "sources_count": {"documents": 1, "web": 3},
     "total_words": 1834
@@ -133,7 +134,7 @@ Other responses:
 }
 ```
 
-`max_rounds` / `budget_doc` / `budget_web` are the requested budgets, stored on the record at creation (same defaults as the POST body: 3 / 10 / 5) so a finished run can be diagnosed against the parameters it ran with. `stats` is present only after the run produced a result; `quality` is present only for completed structured (json) runs — it is the `quality` object from the report envelope, computed at assembly, with: `citation_density` (`overall` 0–1 plus `per_section`), `verification` (`confidence`, `coverage`, `gaps`, `unresolvable_citations` — keys cited in the body but absent from the source registry, `dropped_bare_citations` — bare numbers removed), `sources_count` (`documents` / `web`), and `total_words`.
+`max_rounds` / `budget_doc` / `budget_web` are the requested budgets, stored on the record at creation (same defaults as the POST body: 3 / 10 / 5) so a finished run can be diagnosed against the parameters it ran with. `stats` is present only after the run produced a result; `quality` is present only for completed structured (json) runs — it is the `quality` object from the report envelope, computed at assembly, with: `citation_density` (`overall` 0–1 plus `per_section`), `verification` (`confidence`, `coverage`, `gaps`, `unresolvable_citations` — keys cited in the body but absent from the source registry, `dropped_bare_citations` — bare numbers removed, `normalized_citations` — deterministic, non-blocking counts of citation-mark fixes applied at assembly: bare registry keys resolved to titles in callout/note prose, adjacent identical bracket groups collapsed `[X][X]`→`[X]`, registered-title brackets stripped to bare mentions, empty bracket pairs removed), `sources_count` (`documents` / `web`), and `total_words`.
 
 404, unknown id: `{"error": "unknown task: <id>"}`
 

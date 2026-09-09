@@ -84,7 +84,7 @@ def test_real_string_w1_replaced_title_rest_byte_identical():
 
     rewritten = _rewrite_prose_source_keys(report, _registry())
 
-    assert rewritten == 1
+    assert rewritten == {"spans_rewritten": 1, "keys_rewritten": 1}
     new_text = report.report.sections[0].blocks[0].spans[0].text
     expected = span_text.replace("W1", REAL_TITLE)
     assert new_text == expected  # everything else byte-identical
@@ -120,7 +120,7 @@ def test_non_citation_note_prose_not_rewritten():
 
     rewritten = _rewrite_prose_source_keys(report, _registry())
 
-    assert rewritten == 0
+    assert rewritten == {"spans_rewritten": 0, "keys_rewritten": 0}
     assert report.report.sections[0].blocks[0].spans[0].text == text
 
 
@@ -134,8 +134,8 @@ def test_idempotent():
     after_first = report.report.sections[0].blocks[0].spans[0].text
     second = _rewrite_prose_source_keys(report, _registry())
 
-    assert first == 1
-    assert second == 0
+    assert first == {"spans_rewritten": 1, "keys_rewritten": 1}
+    assert second == {"spans_rewritten": 0, "keys_rewritten": 0}
     assert report.report.sections[0].blocks[0].spans[0].text == after_first
 
 
@@ -148,7 +148,7 @@ def test_key_with_blank_title_left_as_is():
 
     rewritten = _rewrite_prose_source_keys(report, registry)
 
-    assert rewritten == 0
+    assert rewritten == {"spans_rewritten": 0, "keys_rewritten": 0}
     assert report.report.sections[0].blocks[0].spans[0].text == text
 
 
@@ -167,7 +167,8 @@ def test_title_containing_other_key_does_not_cascade():
     second = _rewrite_prose_source_keys(report, registry)
 
     assert report.report.sections[0].blocks[0].spans[0].text == text
-    assert first == 0 and second == 0
+    assert first == {"spans_rewritten": 0, "keys_rewritten": 0}
+    assert second == {"spans_rewritten": 0, "keys_rewritten": 0}
 
 
 def test_assemble_wires_rewrite_for_real_string():
