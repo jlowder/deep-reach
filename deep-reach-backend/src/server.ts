@@ -152,6 +152,18 @@ export async function createServer(opts: ServerOptions = {}): Promise<FastifyIns
     const queryTitle = q.title !== undefined && q.title !== "" ? q.title : undefined;
 
     const body = req.body as unknown;
+
+    // A body that parses to exactly `null` (the worker's /report used to
+    // answer 200 "null" for a run that never assembled a report) is not a
+    // document. Name it before the generic zod message, which only says
+    // "Expected object, received null" and reveals nothing about the cause.
+    if (body === null || body === undefined) {
+      return badRequest(
+        reply,
+        "document envelope is null — upstream worker produced no report (check task status; failed runs have no downloadable artifact)"
+      );
+    }
+
     const isRawDocument =
       isPlainObject(body) && "report" in body && !("document" in body) && !("markdown" in body);
 

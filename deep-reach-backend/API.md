@@ -148,7 +148,7 @@ Valid examples: `test/fixtures/tiny.json`, `test/fixtures/unicode.json`,
 
 | Status | When                                                                                       |
 | ------ | ------------------------------------------------------------------------------------------ |
-| 400    | Malformed JSON (fastify `FST_ERR_CTP_INVALID_JSON_BODY`); both/neither `document`+`markdown`; document schema violation (zod details, e.g. `document validation failed:\n  - report.sections: Required`); invalid `format`/`page_format` |
+| 400    | Malformed JSON (fastify `FST_ERR_CTP_INVALID_JSON_BODY`); both/neither `document`+`markdown`; a `null`/missing envelope (upstream worker produced no report — `document envelope is null — …`); document schema violation (zod details, e.g. `document validation failed:\n  - report.sections: Required`); invalid `format`/`page_format` |
 | 413    | Body over 10 MB                                                                             |
 | 500    | Rendering or PDF generation failure (internal error message)                                |
 | 503    | PDF requested but Chromium unavailable: `Chromium is not installed. Run: npx playwright install chromium` |
