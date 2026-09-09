@@ -304,9 +304,15 @@ CONTRACT — all of these are mandatory:
    reusing the same key in multiple sentences is correct and expected. NEVER
    invent a key that is
    not present in this section's evidence. Each key goes at the end of the
-   sentence it supports. In prose (including citation notes), refer to
-   sources by their title or subject — NEVER by registry key (W1, D2, …);
-   keys belong only in the citations field. If the Evidence block is empty:
+   sentence it supports (repeating the same key across sentences is fine —
+   duplicates are collapsed automatically). In prose, mention a source by
+   its bare title or subject WITHOUT brackets (e.g. "LG AI Research's
+   EXAONE Forecast for Finance"); put citation keys only in the citations
+   field or as a single [D1]-form marker at the end of the sentence. Never
+   wrap a source title in brackets in prose. Never write empty brackets,
+   placeholder brackets, or "[]" anywhere in the text — a sentence with no
+   source support simply has no citation marker. If the Evidence block is
+   empty:
    attach NO citations (the density target does not apply — never invent
    keys to satisfy it) and include one `citation_note` block stating briefly
    that no source material was available for this section and that its claims
@@ -369,7 +375,9 @@ CONTRACT — all of these are mandatory:
    findings of the report.
 5. Citations: you may use ONLY [D#]/[W#] keys that appear in the provided
    section texts, and only at the end of the sentence they support — never
-   invent a key. A pure-synthesis sentence may have citations [].
+   invent a key. A pure-synthesis sentence with no source support has an
+   EMPTY citations array in the JSON and no citation marker in the text —
+   never write "[]" or any empty brackets in the text.
 6. Do NOT introduce new factual claims not present in the provided
    sections: you are connecting what is already there, not researching.
 7. Block vocabulary (one line each):
@@ -385,7 +393,8 @@ CONTRACT — all of these are mandatory:
    Table cells and list items must be span objects, never bare strings.
 8. Per-sentence spans: split each paragraph into spans so the span that ends
    a cited sentence carries that sentence's citation keys; uncited
-   transition spans get citations []. Use at least 2 blocks.
+   transition spans get an empty citations array in the JSON (never "[]"
+   in the text). Use at least 2 blocks.
 """ + _MATH_RULES_JSON
 
 
