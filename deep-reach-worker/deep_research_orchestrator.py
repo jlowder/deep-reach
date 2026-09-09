@@ -649,7 +649,11 @@ def deep_research(
                 f"({type(exc).__name__}: {exc}); continuing."
             )
 
-    def _finish(final_answer: str) -> dict:
+    def _finish(final_answer: str, error: Optional[str] = None) -> dict:
+        if error is not None:
+            # The run ended without a report: the API layer finalizes the
+            # record as failed with this message instead of "completed".
+            state["final_error"] = error
         stats["llm_calls"] = budget.count
         stats["wall_s"] = round(time.time() - started, 1)
         stats["sections"] = len(sections)
@@ -684,10 +688,11 @@ def deep_research(
         _notify_stage(1, f"decomposing query: {_shorten(user_query)}")
         if not budget.can_afford(1):
             print("[DEEP] WARNING: LLM budget exhausted before decomposition; nothing to assemble.")
-            return _finish(
+            msg = (
                 "Deep research failed: the LLM call budget was exhausted before "
                 "the query could be decomposed."
             )
+            return _finish(msg, error=msg)
         plan = decompose_query(
             user_query, catalog, verbose=verbose, endpoint=endpoint, api_key=api_key
         )
@@ -726,11 +731,12 @@ def deep_research(
         sub_questions = list(plan.get("sub_questions") or [])
         if not sub_questions:
             _log_stage("1 DECOMPOSE", "FAILED (no sub-questions)")
-            return _finish(
+            msg = (
                 "Deep research failed: the query could not be decomposed into "
                 "sub-questions (the decomposer returned an empty plan). Please "
                 "rephrase the request and try again."
             )
+            return _finish(msg, error=msg)
         # Priority order (1 first), stable within a priority.
         sub_questions.sort(key=lambda sq: (int(sq.get("priority") or 3),))
         _log_stage(

@@ -826,3 +826,96 @@ def test_real_deep_research_through_api(monkeypatch):
         for d in created:
             shutil.rmtree(d, ignore_errors=True)
         tdp._CACHE_TMP_DIRS[:] = [p for p in tdp._CACHE_TMP_DIRS if p not in created]
+
+
+# ---------------------------------------------------------------------------
+# Hollow runs: the pipeline returns without a report (regression for task
+# 9deb0f48 — an empty ResearchPlan early-finished the run, the record was
+# finalized "completed" with a null report, /report served 200 "null", and
+# paperbot 400'd on it). A run without a report artifact must end "failed"
+# with a named error, and /report must 409, never 200 "null".
+# ---------------------------------------------------------------------------
+
+
+def _hollow_run_fn(with_reason: bool):
+    """A run_fn that finishes the pipeline normally but without a report —
+    the 9deb shape. state carries the orchestrator's final_error message
+    only when with_reason is True."""
+
+    def run_fn(topic, **kwargs):
+        on_stage = kwargs.get("on_stage")
+        if on_stage is not None:
+            on_stage(1, "decomposing query")
+            on_stage(1, "model returned an empty plan — retrying with fallback")
+        state: dict = {}
+        if with_reason:
+            state["final_error"] = (
+                "Deep research failed: the query could not be decomposed into "
+                "sub-questions (the decomposer returned an empty plan)."
+            )
+        return {
+            "final_answer": "Deep research failed: ...",
+            "state": state,
+            "stats": {"llm_calls": 1, "wall_s": 20.5, "sections": 0},
+        }
+
+    return run_fn
+
+
+def test_hollow_run_finalizes_failed_with_reason():
+    client = TestClient(api_server.create_app(run_fn=_hollow_run_fn(True)))
+    task_id = client.post("/research", json={"topic": "t"}).json()["task_id"]
+    last = _wait(client, task_id)
+    # Not "completed" (the 9deb bug): no report artifact -> failed.
+    assert last["status"] == "failed"
+    assert last["error"].startswith("Deep research failed")
+    assert "quality" not in last
+    # The decompose retry is visible in the step log.
+    assert any(
+        s["stage"] == "decompose" and "empty plan" in s["detail"]
+        for s in last["steps"]
+    )
+    # /report never serves a bare null: 409 naming the failure.
+    resp = client.get(f"/research/{task_id}/report")
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["status"] == "failed"
+    assert body["error"].startswith("Deep research failed")
+
+
+def test_hollow_run_without_reason_gets_default_error():
+    client = TestClient(api_server.create_app(run_fn=_hollow_run_fn(False)))
+    task_id = client.post("/research", json={"topic": "t"}).json()["task_id"]
+    last = _wait(client, task_id)
+    assert last["status"] == "failed"
+    assert last["error"] == "run produced no report"
+
+
+def _app_tasks(app) -> dict:
+    """The per-app task store: a closure local of the report route."""
+    route = next(
+        r for r in app.router.routes
+        if getattr(r, "path", "") == "/research/{task_id}/report"
+    )
+    for name, cell in zip(route.endpoint.__code__.co_freevars, route.endpoint.__closure__):
+        if name == "tasks":
+            return cell.cell_contents
+    raise AssertionError("'tasks' not among the report route's free variables")
+
+
+def test_report_409_when_completed_without_artifact():
+    # Defensive branch: a record that reached "completed" without a report
+    # (injected directly — the new _worker logic normally fails such runs
+    # before they finalize completed) must 409, never 200 "null".
+    app = api_server.create_app(
+        run_fn=lambda topic, **kw: {"final_answer": "x", "state": {}, "stats": {}}
+    )
+    client = TestClient(app)
+    rec = api_server.TaskRecord(id="hollow", topic="t", status="completed")
+    rec.finished_at = time.time()
+    _app_tasks(app)[rec.id] = rec
+    resp = client.get("/research/hollow/report")
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["error"] == "no report artifact — the run produced no report"
+    assert body["status"] == "completed"

@@ -7,6 +7,8 @@ get_indexed_document_catalog are patched where used, so nothing touches
 Qdrant, the repo's docs/, or the network.
 """
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -27,7 +29,18 @@ NOT_PDF = b"definitely not a pdf"
 
 
 def _result(topic: str) -> dict:
-    return {"final_answer": f"done {topic}", "state": {}, "stats": {"llm_calls": 1}}
+    # Carries a report artifact: a run that returns without one is now
+    # finalized "failed" (see api_server._worker), and these tests assert
+    # "completed".
+    return {
+        "final_answer": f"done {topic}",
+        "state": {
+            "report_json": json.dumps(
+                {"schema_version": "1.0", "report": {"sections": []}, "quality": None}
+            )
+        },
+        "stats": {"llm_calls": 1},
+    }
 
 
 def _ok_run_fn(topic, **kwargs):

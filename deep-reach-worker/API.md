@@ -183,7 +183,8 @@ pump — the queue advances only when the zombie truly stops.
 }
 ```
 
-- 409, while pending, running, or failed: `{"status": "pending"}`, `{"status": "running"}` or `{"status": "failed"}`
+- 409, while pending, running, or failed: `{"status": "<status>"}` (plus `"error"` when the record has one — e.g. the orchestrator's failure message or the watchdog timeout)
+- 409, when completed **but the run produced no report** (a pipeline exit that never assembled one): `{"error": "no report artifact — the run produced no report", "status": "completed"}` — this endpoint never serves a bare `null` 200
 - 404, unknown id: `{"error": "unknown task: <id>"}`
 
 ### GET /health
@@ -210,14 +211,17 @@ assemble: assembling final report
 assemble: complete (structured): 1 section(s), 3 source(s)
 ```
 
-Poll `GET /research/{id}` (every ~10 s) and watch `current_step` advance through that sequence. A task with staged RAG documents records one extra first step — `documents: indexing N document(s)` (or `…indexing failed — continuing without local docs`) — before the pipeline's stage steps.
+Poll `GET /research/{id}` (every ~10 s) and watch `current_step` advance through that sequence. A task with staged RAG documents records one extra first step — `documents: indexing N document(s)` (or `…indexing failed — continuing without local docs`) — before the pipeline's stage steps. If the model's decomposition call returns an unusable plan (a preamble, malformed JSON, or a valid-but-empty `sub_questions`), one step is recorded before the single retry — `decompose: model returned an empty plan — retrying with fallback`.
 
 ## Status lifecycle
 
 ```
-pending ──▶ running ──▶ completed   pipeline returns; stats + report stored
+pending ──▶ running ──▶ completed   pipeline returns a report; stats + report stored
    │          │         └──▶ failed  exception (error = "<ExceptionType>: <message>")
-   │          │                         or watchdog timeout (error = "timed out after 2700s")
+   │          │                     or watchdog timeout (error = "timed out after 2700s")
+   │          │                     or a pipeline that returned without a report
+   │          │                       (error = the orchestrator's failure message, or
+   │          │                        "run produced no report")
    └──────────┘ (the pump promotes the oldest pending task to running —
                  a newly promoted task also briefly shows current_step "queued")
 ```
