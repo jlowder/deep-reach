@@ -25,6 +25,7 @@ Standard mode (orchestrator_agent) is NOT modified.
 
 import importlib
 import json
+import logging
 import re
 import threading
 import time
@@ -69,6 +70,8 @@ from deep_research_structured import (
     parse_exec_summary,
     sections_plain_text,
 )
+
+logger = logging.getLogger(__name__)
 
 # Global LLM call budget for one deep-research run (plan B / P2-3 ≈ 40).
 # Worst-case tracked calls ≈ 45: decompose(1) + sufficiency/investigation
@@ -689,12 +692,23 @@ def deep_research(
             user_query, catalog, verbose=verbose, endpoint=endpoint, api_key=api_key
         )
         if plan.get("source") == "fallback":
-            # One retry: a garbage structured call lands on the
-            # single-sub-question fallback plan. Keep whichever plan has MORE
-            # sub-questions (on a tie the first); no further retries.
+            # One retry: an unusable structured call (preamble prose,
+            # malformed JSON, or — now that sub_questions has min_length=1 —
+            # a valid-but-empty plan) lands on the single-sub-question
+            # fallback plan. Make the cause visible in the worker log AND the
+            # task step list (on_stage/record_step — a bare _log_stage print
+            # never reached the API step log), then ask the model once more.
+            # Keep whichever plan has MORE sub-questions (on a tie the first);
+            # no further retries.
+            reason = str(plan.get("fallback_reason") or "unusable plan")
+            logger.warning(
+                "[DEEP] decompose: model returned an %s — retrying with fallback",
+                reason,
+            )
             if budget.can_afford(1):
                 if verbose:
                     print("[DEEP] decomposition source=fallback; retrying once")
+                _notify_stage(1, f"model returned an {reason} — retrying with fallback")
                 retry_plan = decompose_query(
                     user_query, catalog, verbose=verbose,
                     endpoint=endpoint, api_key=api_key,

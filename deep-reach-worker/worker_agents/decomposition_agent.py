@@ -57,7 +57,14 @@ class ResearchPlan(BaseModel):
         default=False,
         description="True only for a single narrow factual question",
     )
-    sub_questions: List[SubQuestion] = Field(default_factory=list)
+    sub_questions: List[SubQuestion] = Field(
+        min_length=1,
+        description=(
+            "2-10 concrete sub-questions the report must answer. "
+            "Must not be empty: if you cannot decompose the query, return a "
+            "single sub-question that is the original query itself."
+        ),
+    )
     report_title: str = Field(
         default="",
         description=(
@@ -98,8 +105,31 @@ Rules:
 """
 
 
-def _fallback_plan(user_query: str, source: str = "fallback") -> Dict[str, Any]:
-    """Valid single-sub-question plan used when decomposition cannot be parsed."""
+def _is_empty_plan(value: Any) -> bool:
+    """True when a parsed/extracted plan object carries no usable sub-questions
+    (missing key, null, or empty list/dict)."""
+    if value is None:
+        return True
+    if isinstance(value, BaseModel):
+        value = value.model_dump()
+    if not isinstance(value, dict):
+        return False
+    sqs = value.get("sub_questions")
+    if sqs is None:
+        return True
+    if isinstance(sqs, (dict, list, tuple)):
+        return len(sqs) == 0
+    return False
+
+
+def _fallback_plan(
+    user_query: str, source: str = "fallback", reason: str = "unusable plan"
+) -> Dict[str, Any]:
+    """Valid single-sub-question plan used when decomposition cannot be parsed.
+
+    ``reason`` is a short human phrase (e.g. "empty plan") stored on the plan
+    so the orchestrator can name the fallback cause in its task step log.
+    """
     return {
         "is_simple": True,
         "sub_questions": [
@@ -112,6 +142,7 @@ def _fallback_plan(user_query: str, source: str = "fallback") -> Dict[str, Any]:
             }
         ],
         "source": source,
+        "fallback_reason": reason,
     }
 
 
@@ -137,7 +168,14 @@ def _ensure_ids(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _parse_plan(response: Any, user_query: str) -> Dict[str, Any]:
-    """Robust parse (DEEP.md §7.2 style): structured -> text JSON -> fallback."""
+    """Robust parse (DEEP.md §7.2 style): structured -> text JSON -> fallback.
+
+    An *empty* plan (``sub_questions`` missing/null/[]) fails validation via
+    ``ResearchPlan.sub_questions``' min_length=1, so it falls through to the
+    single-sub-question fallback plan with ``source='fallback'`` — which makes
+    the orchestrator's decomposition retry fire.
+    """
+    reason = ""  # why the final fallback is needed (set when a path is empty)
     # 1) Structured output from responses.parse().
     try:
         parsed = getattr(response, "output_parsed", None)
@@ -146,7 +184,12 @@ def _parse_plan(response: Any, user_query: str) -> Dict[str, Any]:
             data["source"] = "structured"
             return data
     except Exception as exc:
-        logger.warning(f"Decomposer structured output failed to validate: {exc}")
+        if not reason and _is_empty_plan(getattr(response, "output_parsed", None)):
+            reason = "empty plan"
+        logger.warning(
+            f"Decomposer structured output failed to validate: {exc}"
+            + (" (empty sub_questions)" if reason else "")
+        )
 
     # 2) JSON object embedded in the raw text.
     try:
@@ -156,11 +199,20 @@ def _parse_plan(response: Any, user_query: str) -> Dict[str, Any]:
             data = _validated_plan_from_candidate(candidate)
             return data
     except Exception as exc:
-        logger.warning(f"Decomposer text JSON fallback failed: {exc}")
+        if not reason and _is_empty_plan(_extract_json_object(raw_text)):
+            reason = "empty plan"
+        logger.warning(
+            f"Decomposer text JSON fallback failed: {exc}"
+            + (" (empty sub_questions)" if reason else "")
+        )
 
     # 3) Final fallback: always a valid plan.
-    logger.warning("Decomposer produced no usable plan; using single-sub-question fallback")
-    return _fallback_plan(user_query)
+    reason = reason or "unusable plan"
+    logger.warning(
+        f"Decomposer produced no usable plan ({reason}); "
+        "using single-sub-question fallback"
+    )
+    return _fallback_plan(user_query, reason=reason)
 
 
 def _normalize_plan_candidate(data: Dict[str, Any]) -> Dict[str, Any]:
