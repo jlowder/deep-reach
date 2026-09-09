@@ -479,8 +479,19 @@ def _promote_bare_equation_spans(report: ResearchReport) -> int:
 _SOURCE_KEY_RE = re.compile(r"\b(?:W|D)\d+\b")
 
 
-def _rewrite_prose_source_keys(report: ResearchReport, registry: dict) -> int:
-    """Resolve bare registry keys in citation-note/callout span prose to the
+def _is_bracketed_key(text: str, start: int, end: int) -> bool:
+    """True when the key match at [start, end) is IMMEDIATELY enclosed in a
+    ``[`` / ``]`` pair (the ``[D1]`` marker form)."""
+    return (
+        start > 0
+        and end < len(text)
+        and text[start - 1] == "["
+        and text[end] == "]"
+    )
+
+
+def _rewrite_prose_source_keys(report: ResearchReport, registry: dict) -> dict:
+    """Resolve BARE registry keys in citation-note/callout span prose to the
     source title they refer to.
 
     The writer is told never to echo a registry key in prose, but its
@@ -491,15 +502,22 @@ def _rewrite_prose_source_keys(report: ResearchReport, registry: dict) -> int:
     dangling "W1" in a Sources callout). Substituting the title fixes the
     dangling reference deterministically.
 
-    Scope: span TEXT of ``citation_note`` and ``callout`` blocks only.
-    Keys absent from the registry are left untouched (never guess); a key
-    whose registry entry has no title is left untouched; a key whose title
-    itself contains a key that resolves to a DIFFERENT title is left
-    untouched (substituting it would cascade on a second pass — keeps the
-    rewrite idempotent); ``citations`` arrays, code, and equation spans are
-    never modified. Returns the number of spans rewritten. Never raises.
+    Scope: span TEXT of ``citation_note`` and ``callout`` blocks only, and
+    only keys with NO brackets: a key immediately enclosed in ``[D1]`` form
+    is a VALID citation marker — _remap_citations_to_final_sources keeps it
+    resolvable and the renderer prints it as the deduped numeric marker — so
+    it is left untouched (title substitution inside the brackets produced
+    the mixed ``[Title] [1]`` style on real task 7a111172). Keys absent from
+    the registry are left untouched (never guess); a key whose registry
+    entry has no title is left untouched; a key whose title itself contains
+    a key that resolves to a DIFFERENT title is left untouched
+    (substituting it would cascade on a second pass — keeps the rewrite
+    idempotent); ``citations`` arrays, code, and equation spans are never
+    modified. Returns ``{"spans_rewritten": n, "keys_rewritten": n}``.
+    Never raises.
     """
-    rewritten = 0
+    spans_rewritten = 0
+    keys_rewritten = 0
     try:
         for si, section in enumerate(report.report.sections or []):
             for bi, block in enumerate(section.blocks or []):
@@ -521,6 +539,9 @@ def _rewrite_prose_source_keys(report: ResearchReport, registry: dict) -> int:
                         continue
 
                     def repl(m: re.Match) -> str:
+                        nonlocal keys_rewritten
+                        if _is_bracketed_key(text, m.start(), m.end()):
+                            return m.group(0)  # valid marker: leave it
                         entry = (registry or {}).get(m.group(0))
                         title = (entry or {}).get("title") or ""
                         if not title.strip():
@@ -530,12 +551,13 @@ def _rewrite_prose_source_keys(report: ResearchReport, registry: dict) -> int:
                             tt = (te or {}).get("title") or ""
                             if tt.strip() and tt != title:
                                 return m.group(0)  # idempotency guard
+                        keys_rewritten += 1
                         return title
 
                     new = _SOURCE_KEY_RE.sub(repl, text)
                     if new != text:
                         span.text = new
-                        rewritten += 1
+                        spans_rewritten += 1
                         logger.debug(
                             "resolved bare source key(s) in citation prose: "
                             "section %d block %d %r -> %r",
@@ -543,7 +565,140 @@ def _rewrite_prose_source_keys(report: ResearchReport, registry: dict) -> int:
                         )
     except Exception:
         logger.exception("prose source-key rewrite failed; continuing unrewritten")
-    return rewritten
+    return {"spans_rewritten": spans_rewritten, "keys_rewritten": keys_rewritten}
+
+
+# Bracket group with no nested brackets, inside its pair.
+_BRACKET_GROUP_RE = re.compile(r"\[([^\[\]]*)\]")
+# Two ADJACENT identical bracket groups, any whitespace between the pairs.
+_ADJACENT_DUP_BRACKET_RE = re.compile(r"\[(?P<grp>[^\[\]]*)\]\s*\[(?P=grp)\]")
+# An empty / whitespace-only bracket pair, plus the space directly before it.
+_EMPTY_BRACKET_RE = re.compile(r"\s*\[\s*\]")
+# Inline / display math segments, never touched by any rule below.
+_MATH_SEGMENT_RE = re.compile(r"(?s)\$[^$]*\$|\\\(.+?\\\)|\\\[.+?\\\]")
+
+
+def _normalize_ws_key(s: str) -> str:
+    """Case-fold and collapse internal whitespace (title comparison key)."""
+    return re.sub(r"\s+", " ", s).strip().lower()
+
+
+def _fix_citation_segment(segment: str, title_map: dict, counts: dict) -> str:
+    """Apply the three normalization rules to one NON-MATH text segment,
+    accumulating occurrence counts into ``counts`` (in place)."""
+    # (a) collapse adjacent identical bracket groups until stable
+    # ("[X][X][X]" needs more than one pass).
+    prev = None
+    while prev != segment:
+        prev = segment
+        segment, n = _ADJACENT_DUP_BRACKET_RE.subn(r"[\g<grp>]", segment)
+        counts["adjacent_duplicates_collapsed"] += n
+
+    # (b) strip brackets from groups whose content is a REGISTERED source
+    # title (case-insensitive, internal-whitespace-normalized), restoring the
+    # canonical registered title; every other bracketed group is untouched.
+    def _title_repl(m: re.Match) -> str:
+        canonical = title_map.get(_normalize_ws_key(m.group(1)))
+        if canonical is None:
+            return m.group(0)
+        counts["title_brackets_stripped"] += 1
+        return canonical
+
+    segment = _BRACKET_GROUP_RE.sub(_title_repl, segment)
+
+    # (c) remove empty / whitespace-only bracket pairs ("[]", "[ ]")
+    # When the pair sits at the very start of the segment, its trailing
+    # space would survive as a leading space — drop it.
+    pre = segment
+    segment, n = _EMPTY_BRACKET_RE.subn("", segment)
+    if n:
+        counts["empty_brackets_removed"] += n
+        if re.match(r"\[\s*\]", pre.lstrip()) and segment[:1] == " ":
+            segment = segment[1:]
+    return segment
+
+
+def _normalize_citation_mark_text(text: str, title_map: dict, counts: dict) -> str:
+    """Run the three rules over a text, protecting math segments."""
+    if not text:
+        return text
+    out: list[str] = []
+    last = 0
+    for m in _MATH_SEGMENT_RE.finditer(text):
+        out.append(_fix_citation_segment(text[last:m.start()], title_map, counts))
+        out.append(m.group(0))  # math: never touched
+        last = m.end()
+    out.append(_fix_citation_segment(text[last:], title_map, counts))
+    return "".join(out)
+
+
+def _normalize_citation_marks(report: ResearchReport) -> dict:
+    """Deterministically clean citation-mark artifacts out of every prose
+    text at assembly: span text of ALL block types (paragraphs, callouts,
+    citation notes, list items, table cells), block-level text (headings
+    etc.), and executive-summary paragraphs.
+
+    Rules: (a) collapse adjacent identical bracket groups ``[X][X]`` →
+    ``[X]`` (whitespace-insensitive between the pairs); (b) strip the
+    brackets of any group whose content equals a registered source title
+    (final sources list; case-insensitive, internal-whitespace-normalized)
+    — non-registered bracketed text (``[arXiv:2401.12345]``, an unmatched
+    ``[Title]``) is never touched; (c) remove empty / whitespace-only
+    bracket pairs. Code and equation blocks and math segments are never
+    touched. Idempotent; never raises. Returns the three counters.
+    """
+    counts = {
+        "adjacent_duplicates_collapsed": 0,
+        "title_brackets_stripped": 0,
+        "empty_brackets_removed": 0,
+    }
+    try:
+        title_map: dict[str, str] = {}
+        for source in report.report.sources or []:
+            key = _normalize_ws_key(source.title or "")
+            if key:
+                title_map.setdefault(key, source.title or "")
+
+        for section in report.report.sections or []:
+            for block in section.blocks or []:
+                if block.type in (
+                    BlockType.code_block,
+                    BlockType.equation,
+                    "code_block",
+                    "equation",
+                ):
+                    continue  # code/equation text: never touch
+                for span in block.spans or []:
+                    if isinstance(span, Span):
+                        span.text = _normalize_citation_mark_text(span.text or "", title_map, counts)
+                for item in block.items or []:
+                    if isinstance(item, Span):
+                        item.text = _normalize_citation_mark_text(item.text or "", title_map, counts)
+                for row in block.rows or []:
+                    if not isinstance(row, list):
+                        continue
+                    for i, cell in enumerate(row):
+                        if isinstance(cell, Span):
+                            row[i] = Span(
+                                text=_normalize_citation_mark_text(cell.text or "", title_map, counts),
+                                citations=list(cell.citations),
+                            )
+                        elif isinstance(cell, str):
+                            row[i] = Span(
+                                text=_normalize_citation_mark_text(cell, title_map, counts),
+                                citations=[],
+                            )
+                if not (block.spans or []) and not (block.items or []):
+                    block.text = _normalize_citation_mark_text(block.text or "", title_map, counts)
+
+        for i, para in enumerate(report.report.executive_summary or []):
+            if isinstance(para, str):
+                report.report.executive_summary[i] = _normalize_citation_mark_text(
+                    para, title_map, counts
+                )
+    except Exception:
+        logger.exception("citation-mark normalization failed; continuing unnormalized")
+    return counts
 
 
 def assemble_structured_report(
@@ -567,7 +722,10 @@ def assemble_structured_report(
     [D#]/[W#] text markers onto those final records (plan §6.3 — positions
     are 1-based into the deduped array, so they never go out of range),
     drop sub-heading blocks with no content zone, resolve bare registry keys
-    in citation-note/callout prose to source titles (the bibliography never
+    in citation-note/callout prose to source titles, and normalize citation
+    marks (collapse adjacent identical bracket groups, de-bracket registered
+    source titles, drop empty bracket pairs — counts land in
+    quality.verification.normalized_citations),    in citation-note/callout prose to source titles (the bibliography never
     prints keys, so a prose key would dangle), promote undelimited
     display-equation spans to equation blocks, wrap undelimited inline LaTeX
     runs in prose spans with $...$, balance unmatched closing braces in
@@ -609,7 +767,8 @@ def assemble_structured_report(
     report.report.sources = [Source.model_validate(d) for d in source_dicts]
 
     _remap_citations_to_final_sources(report, registry)
-    _rewrite_prose_source_keys(report, registry)
+    key_rewrite_counts = _rewrite_prose_source_keys(report, registry)
+    norm_counts = _normalize_citation_marks(report)
     _promote_bare_equation_spans(report)
     _wrap_undelimited_latex(report)
     _balance_equation_bodies(report)
@@ -620,6 +779,12 @@ def assemble_structured_report(
         **(verification_status or {}),
         "unresolvable_citations": unresolvable,
         "dropped_bare_citations": dropped,
+        "normalized_citations": {
+            "bare_key_rewrites": key_rewrite_counts["keys_rewritten"],
+            "adjacent_duplicates_collapsed": norm_counts["adjacent_duplicates_collapsed"],
+            "title_brackets_stripped": norm_counts["title_brackets_stripped"],
+            "empty_brackets_removed": norm_counts["empty_brackets_removed"],
+        },
     }
     if not_generated or orphan_gaps:
         gaps = list(report.quality.verification.get("gaps") or [])

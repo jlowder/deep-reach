@@ -84,7 +84,7 @@ def test_real_string_w1_replaced_title_rest_byte_identical():
 
     rewritten = _rewrite_prose_source_keys(report, _registry())
 
-    assert rewritten == 1
+    assert rewritten == {"spans_rewritten": 1, "keys_rewritten": 1}
     new_text = report.report.sections[0].blocks[0].spans[0].text
     expected = span_text.replace("W1", REAL_TITLE)
     assert new_text == expected  # everything else byte-identical
@@ -120,7 +120,7 @@ def test_non_citation_note_prose_not_rewritten():
 
     rewritten = _rewrite_prose_source_keys(report, _registry())
 
-    assert rewritten == 0
+    assert rewritten == {"spans_rewritten": 0, "keys_rewritten": 0}
     assert report.report.sections[0].blocks[0].spans[0].text == text
 
 
@@ -134,8 +134,8 @@ def test_idempotent():
     after_first = report.report.sections[0].blocks[0].spans[0].text
     second = _rewrite_prose_source_keys(report, _registry())
 
-    assert first == 1
-    assert second == 0
+    assert first == {"spans_rewritten": 1, "keys_rewritten": 1}
+    assert second == {"spans_rewritten": 0, "keys_rewritten": 0}
     assert report.report.sections[0].blocks[0].spans[0].text == after_first
 
 
@@ -148,7 +148,7 @@ def test_key_with_blank_title_left_as_is():
 
     rewritten = _rewrite_prose_source_keys(report, registry)
 
-    assert rewritten == 0
+    assert rewritten == {"spans_rewritten": 0, "keys_rewritten": 0}
     assert report.report.sections[0].blocks[0].spans[0].text == text
 
 
@@ -167,7 +167,74 @@ def test_title_containing_other_key_does_not_cascade():
     second = _rewrite_prose_source_keys(report, registry)
 
     assert report.report.sections[0].blocks[0].spans[0].text == text
-    assert first == 0 and second == 0
+    assert first == {"spans_rewritten": 0, "keys_rewritten": 0}
+    assert second == {"spans_rewritten": 0, "keys_rewritten": 0}
+
+
+# ---------------------------------------------------------------------------
+# Scope: BARE keys only — bracket-enclosed keys are valid citation markers
+# (the renderer maps them to the deduped numeric marker) and must survive
+# this function untouched. (Real task 7a111172: substituting titles into
+# [D1] produced the mixed "[Title] [1]" style in callouts.)
+# ---------------------------------------------------------------------------
+
+
+def test_bracketed_key_at_end_untouched():
+    """A [D1]-form marker at the end of a note sentence is valid and stays."""
+    registry = {"D1": {"kind": "doc", "title": "EXAONE Forecast for Finance", "document_name": "exaone.pdf"}}
+    text = "EXAONE Finance is a financial time series foundation model [D1]."
+    block = ReportBlock(type=BlockType.citation_note, spans=[Span(text=text, citations=["1"])])
+    report = _report_with([block])
+
+    rewritten = _rewrite_prose_source_keys(report, registry)
+
+    assert rewritten == {"spans_rewritten": 0, "keys_rewritten": 0}
+    assert report.report.sections[0].blocks[0].spans[0].text == text
+    assert report.report.sections[0].blocks[0].spans[0].citations == ["1"]
+
+
+def test_bracketed_key_mid_sentence_untouched():
+    """Mid-sentence bracketed markers (twice, here) are left exactly as-is."""
+    registry = {"D1": {"kind": "doc", "title": "EXAONE Forecast for Finance", "document_name": "exaone.pdf"}}
+    text = "See [D1] for the architecture, and [D1] for the benchmarks."
+    block = ReportBlock(type=BlockType.callout, spans=[Span(text=text, citations=["1"])])
+    report = _report_with([block])
+
+    rewritten = _rewrite_prose_source_keys(report, registry)
+
+    assert rewritten == {"spans_rewritten": 0, "keys_rewritten": 0}
+    assert report.report.sections[0].blocks[0].spans[0].text == text
+
+
+def test_doubled_bracketed_keys_untouched():
+    """[D1][D1] is out of THIS function's scope (the assembly normalizer
+    collapses it); the rewriter must not rewrite either copy to a title."""
+    registry = {"D1": {"kind": "doc", "title": "EXAONE Forecast for Finance", "document_name": "exaone.pdf"}}
+    text = "It positions itself as the first attention-free entry [D1][D1]."
+    block = ReportBlock(type=BlockType.citation_note, spans=[Span(text=text, citations=["1"])])
+    report = _report_with([block])
+
+    rewritten = _rewrite_prose_source_keys(report, registry)
+
+    assert rewritten == {"spans_rewritten": 0, "keys_rewritten": 0}
+    assert report.report.sections[0].blocks[0].spans[0].text == text
+
+
+def test_bare_and_bracketed_same_key_only_bare_rewritten():
+    """Mixed span: the bare key resolves to the title, the bracketed copy
+    (even of the same key) is untouched."""
+    registry = {"W1": {"kind": "web", "title": "Effective field theory - Wikipedia", "url": "https://en.wikipedia.org/wiki/Effective_field_theory"}}
+    text = "Claims rest on W1, not [W1]."
+    block = ReportBlock(type=BlockType.citation_note, spans=[Span(text=text, citations=["1"])])
+    report = _report_with([block])
+
+    rewritten = _rewrite_prose_source_keys(report, registry)
+
+    assert rewritten == {"spans_rewritten": 1, "keys_rewritten": 1}
+    assert (
+        report.report.sections[0].blocks[0].spans[0].text
+        == "Claims rest on Effective field theory - Wikipedia, not [W1]."
+    )
 
 
 def test_assemble_wires_rewrite_for_real_string():
