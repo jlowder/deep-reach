@@ -125,7 +125,8 @@ Other responses:
       "gaps": [],
       "unresolvable_citations": ["D2"],
       "dropped_bare_citations": ["7"],
-      "normalized_citations": {"bare_key_rewrites": 2, "adjacent_duplicates_collapsed": 5, "title_brackets_stripped": 3, "empty_brackets_removed": 1}
+      "normalized_citations": {"bare_key_rewrites": 2, "adjacent_duplicates_collapsed": 5, "title_brackets_stripped": 3, "empty_brackets_removed": 1},
+      "decoded_unicode_escapes": 6
     },
     "sources_count": {"documents": 1, "web": 3},
     "total_words": 1834
@@ -134,7 +135,7 @@ Other responses:
 }
 ```
 
-`max_rounds` / `budget_doc` / `budget_web` are the requested budgets, stored on the record at creation (same defaults as the POST body: 3 / 10 / 5) so a finished run can be diagnosed against the parameters it ran with. `stats` is present only after the run produced a result; `quality` is present only for completed structured (json) runs — it is the `quality` object from the report envelope, computed at assembly, with: `citation_density` (`overall` 0–1 plus `per_section`), `verification` (`confidence`, `coverage`, `gaps`, `unresolvable_citations` — keys cited in the body but absent from the source registry, `dropped_bare_citations` — bare numbers removed, `normalized_citations` — deterministic, non-blocking counts of citation-mark fixes applied at assembly: bare registry keys resolved to titles in callout/note prose, adjacent identical bracket groups collapsed `[X][X]`→`[X]`, registered-title brackets stripped to bare mentions, empty bracket pairs removed), `sources_count` (`documents` / `web`), and `total_words`.
+`max_rounds` / `budget_doc` / `budget_web` are the requested budgets, stored on the record at creation (same defaults as the POST body: 3 / 10 / 5) so a finished run can be diagnosed against the parameters it ran with. `stats` is present only after the run produced a result; `quality` is present only for completed structured (json) runs — it is the `quality` object from the report envelope, computed at assembly, with: `citation_density` (`overall` 0–1 plus `per_section`), `verification` (`confidence`, `coverage`, `gaps`, `unresolvable_citations` — keys cited in the body but absent from the source registry, `dropped_bare_citations` — bare numbers removed, `normalized_citations` — deterministic, non-blocking counts of citation-mark fixes applied at assembly: bare registry keys resolved to titles in callout/note prose, adjacent identical bracket groups collapsed `[X][X]`→`[X]`, registered-title brackets stripped to bare mentions, empty bracket pairs removed; `decoded_unicode_escapes` — count of JSON-style `\uXXXX` escapes (exactly 4 hex digits, case-insensitive, not followed by another hex digit) decoded at assembly: `\u2014`→`—` etc.; a math region that is a single such escape unwraps its `$…$`/`$$…$$` delimiters since the decoded char is prose, not math (a model thinking in JSON escapes would otherwise reach KaTeX, where `\u` is the breve accent — the bowl-on-2014 artifact); control-char escapes decode to nothing; code blocks never touched, so a `\uXXXX` in a code sample stays literal), `sources_count` (`documents` / `web`), and `total_words`.
 
 404, unknown id: `{"error": "unknown task: <id>"}`
 
