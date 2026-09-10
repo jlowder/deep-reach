@@ -224,6 +224,15 @@ export type MathKind = "equation" | "inline";
  * everything else decodes every `\\u`+4-hex escape (`\\u2014` → `—`) with a
  * `decoded N \\uXXXX unicode escape(s)…` warning, so the breve-on-2014
  * artifact cannot reach KaTeX.
+ *
+ * After the decode, case-fold repair: an undefined UPPERCASE command whose
+ * lowercase form IS defined (`\\VEE` → `\\vee`, `\\MATHBB` → `\\mathbb`) is a
+ * model case mistake — KaTeX 0.18 is case-sensitive, so it would otherwise
+ * throw and fall back. Each distinct name is folded once with a surfaced
+ * `case-folded undefined command …` warning; a name whose lowercase form is
+ * also undefined (`\\MATHRBUN`) is left untouched and rides the existing
+ * fallback. Folding rewrites names only, so the structural gate result is
+ * unchanged and well-formed regions proceed to KaTeX either way.
  */
 export function renderMath(
   tex: string,
@@ -256,6 +265,13 @@ export function renderMath(
       tex = decoded.text;
     }
   }
+  // Case-fold repair (after the \\u decode, before the gate): an undefined
+  // UPPERCASE command whose lowercase form is defined (\\VEE → \\vee) is a
+  // model case mistake, not a real TeX entity. All-lowercase tex skips the
+  // pass entirely (byte-identical fast path).
+  if (/[A-Z]/.test(tex)) {
+    tex = _caseFoldUndefinedCommands(tex, warnings, kind);
+  }
   if (!_isWellFormedMath(tex)) {
     if (kind === "equation") {
       warnings.push("math fallback: unbalanced braces in equation — showing raw LaTeX");
@@ -270,6 +286,73 @@ export function renderMath(
     warnings.push(`math: ${msg}`);
     return `<span class="math-fallback">${escapeHtml(tex)}</span>`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Case-fold repair
+// ---------------------------------------------------------------------------
+
+// Per-process memo of KaTeX command defined-ness. The probe renders `\\NAME`
+// followed by four neutral `{}` groups: every 0-, 1-, and 2-argument command
+// (\vee, \mathrm, \frac …) renders its empty braced groups as empty atoms, so
+// the probe succeeds iff the command is defined. Commands requiring a
+// following delimiter character (\left, \right) probe as undefined — a
+// conservative miss: such tokens are left untouched and fall to the existing
+// fallback rather than risking a misfold.
+const commandDefined = new Map<string, boolean>();
+
+/** Is `\\NAME` a command KaTeX accepts? Probed lazily, memoized per name. */
+export function _isCommandDefined(name: string): boolean {
+  let defined = commandDefined.get(name);
+  if (defined === undefined) {
+    try {
+      katex.renderToString(`\\${name}{}{}{}{}`, {
+        throwOnError: true,
+        strict: false,
+      });
+      defined = true;
+    } catch {
+      defined = false;
+    }
+    commandDefined.set(name, defined);
+  }
+  return defined;
+}
+
+/**
+ * Rewrite `\\NAME` tokens to `\\name` where NAME is alphabetic, contains an
+ * uppercase letter, is UNDEFINED in KaTeX, and its lowercase form IS defined
+ * (`\\VEE` → `\\vee`, `\\MATHBB` → `\\mathbb`, `\\FRAC` → `\\frac`). One
+ * `case-folded undefined command \\NAME → \\name` warning is pushed per
+ * distinct folded name. Names whose lowercase form is also undefined
+ * (`\\MATHRBUN`) — and already-correct lowercase names — are never touched.
+ * All-lowercase input returns byte-identical with zero warnings.
+ */
+export function _caseFoldUndefinedCommands(
+  tex: string,
+  warnings: string[],
+  kind: MathKind = "inline",
+): string {
+  if (!/[A-Z]/.test(tex)) return tex;
+  const folds = new Map<string, string>();
+  for (const m of tex.matchAll(/\\([A-Za-z]+)/g)) {
+    const name = m[1];
+    if (!/[A-Z]/.test(name)) continue;
+    const lower = name.toLowerCase();
+    if (folds.has(lower)) continue; // one warning + one rewrite per name
+    if (!_isCommandDefined(name) && _isCommandDefined(lower)) {
+      folds.set(lower, name);
+      warnings.push(
+        `${kind}: case-folded undefined command \\${name} → \\${lower}`,
+      );
+    }
+  }
+  if (folds.size === 0) return tex;
+  let out = tex;
+  for (const [lower, upper] of folds) {
+    out = out.replace(new RegExp(`\\\\${upper}`, "g"), `\\${lower}`);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

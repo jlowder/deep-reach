@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { prepare } from "../src/pipeline.js";
-import { _isWellFormedMath, renderMath, _stripDollarDelimiters } from "../src/render/math.js";
+import { _isWellFormedMath, renderMath, _stripDollarDelimiters, _caseFoldUndefinedCommands } from "../src/render/math.js";
 import { renderMathText } from "../src/render/blocks.js";
 import { tempFile } from "./util.js";
 
@@ -308,4 +308,78 @@ test("code_block language latex typesets as display; malformed falls back with s
     html.includes('<pre class="language-python"><code>print(1)</code></pre>'),
     "non-latex code blocks must be unchanged",
   );
+});
+
+// ---------------------------------------------------------------------------
+// Case-fold repair: undefined UPPERCASE commands whose lowercase form is
+// defined (\VEE -> \vee) are a model case mistake; they must typeset, not
+// fall back. Still-undefined names (\MATHRBUN) ride the existing fallback.
+// ---------------------------------------------------------------------------
+
+test("case-fold: undefined uppercase commands rewrite to their defined lowercase forms", () => {
+  const warnings: string[] = [];
+  const tex = _caseFoldUndefinedCommands("G^\\VEE + \\MATHBB{R}", warnings, "inline");
+  assert.equal(tex, "G^\\vee + \\mathbb{R}");
+  assert.deepEqual(warnings, [
+    "inline: case-folded undefined command \\VEE → \\vee",
+    "inline: case-folded undefined command \\MATHBB → \\mathbb",
+  ]);
+});
+
+test("case-fold: one warning per distinct name, all occurrences rewritten", () => {
+  const warnings: string[] = [];
+  const tex = _caseFoldUndefinedCommands("\\ELL^2 \\ominus \\ELL", warnings, "inline");
+  assert.equal(tex, "\\ell^2 \\ominus \\ell");
+  assert.deepEqual(warnings, ["inline: case-folded undefined command \\ELL → \\ell"]);
+});
+
+test("case-fold: already-lowercase and still-undefined commands are untouched", () => {
+  const warnings: string[] = [];
+  assert.equal(_caseFoldUndefinedCommands("G^\\vee", warnings, "inline"), "G^\\vee");
+  assert.deepEqual(warnings, [], "a correct lowercase command warns nothing");
+  const w2: string[] = [];
+  assert.equal(_caseFoldUndefinedCommands("\\MATHRBUN", w2, "inline"), "\\MATHRBUN");
+  assert.deepEqual(w2, [], "a name undefined in both cases is not a case mistake");
+});
+
+test("renderMath case-folds before KaTeX: $G^\\VEE$ typesets with a single warning", () => {
+  const warnings: string[] = [];
+  const html = renderMath("G^\\VEE", false, warnings, "inline");
+  assert.ok(html.includes('class="katex"'), `must typeset, got: ${html}`);
+  assert.ok(html.includes("∨"), "the folded \\vee must render its glyph");
+  assert.deepEqual(warnings, ["inline: case-folded undefined command \\VEE → \\vee"]);
+});
+
+test("renderMath: $G^\\vee$ (already lowercase) renders with no warning", () => {
+  const warnings: string[] = [];
+  const html = renderMath("G^\\vee", false, warnings, "inline");
+  assert.ok(html.includes('class="katex"'), html);
+  assert.deepEqual(warnings, []);
+});
+
+test("renderMath: \\MATHRBUN-class input is untouched and rides the KaTeX fallback", () => {
+  const warnings: string[] = [];
+  const html = renderMath("\\MATHRBUN", false, warnings, "inline");
+  assert.ok(html.startsWith('<span class="math-fallback">'), html);
+  assert.ok(html.includes("\\MATHRBUN"), "fallback shows the raw tex, delimiters free");
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /^math: KaTeX parse error/);
+});
+
+test("header pipeline: broken math in a plain string degrades without $ delimiters", () => {
+  const warnings: string[] = [];
+  const html = renderMathText("Right: $\\MATHRBUN)_G$-local systems", warnings);
+  assert.ok(!html.includes("$"), `no $ may survive: ${html}`);
+  assert.ok(html.includes('class="math-fallback"'), html);
+  assert.ok(html.includes("\\MATHRBUN)_G"), html);
+  assert.ok(warnings.length > 0, "the KaTeX failure is surfaced");
+});
+
+test("decode runs before fold: \\u escape decodes, then \\VEE folds, both surfaced", () => {
+  const warnings: string[] = [];
+  const html = renderMath("G^\\VEE \\u2014 done", false, warnings, "inline");
+  assert.ok(html.includes('class="katex"'), html);
+  assert.ok(html.includes("∨"), html);
+  assert.ok(warnings.some((w) => w.includes("decoded 1 \\uXXXX unicode escape(s)")), warnings.join(" | "));
+  assert.ok(warnings.some((w) => w === "inline: case-folded undefined command \\VEE → \\vee"), warnings.join(" | "));
 });
