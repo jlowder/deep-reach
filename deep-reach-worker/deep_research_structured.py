@@ -701,6 +701,176 @@ def _normalize_citation_marks(report: ResearchReport) -> dict:
     return counts
 
 
+# ---------------------------------------------------------------------------
+# JSON-style unicode escapes in math (the `\\u2014` breve-bowl artifact)
+# ---------------------------------------------------------------------------
+
+# A JSON-style escape: `\\u` + EXACTLY 4 hex digits (case-insensitive) + a
+# following char that is NOT another hex digit (a 5+-digit run is not a JSON
+# escape). In TeX `\\u` is a one-character BREVE ACCENT command and an
+# intended accent is written `\\u{x}` or `\\u x` (non-hex char), so a 4-hex
+# pattern after `\\u` is the unambiguous signature of a model thinking in
+# JSON escapes — `\\u2014` meaning the em dash. KaTeX typesets `\\u2014` as
+# "2"+breve+"014" (the bowl-2014 artifact of real task acf41000, where the
+# synthesis freshly emitted six of them in `$…$` spans).
+_UNICODE_ESCAPE_RE = re.compile(r"\\u([0-9a-fA-F]{4})(?![0-9a-fA-F])( )?")
+_LONE_ESCAPE_RE = re.compile(r"^\\u([0-9a-fA-F]{4})$")
+
+# Math regions: display `$$…$$` first, then inline `$…$`, then `\( … \)` /
+# `\[ … \]`. Used only to decide whether a WHOLE region is a lone escape
+# (rule b, delimiter unwrap); escapes are decoded everywhere, inside or out.
+_MATH_REGION_RE = re.compile(
+    r"(?s)\\\(.+?\\\)|\\\[.+?\\\]|\$\$(?![\$]).*?\$\$(?![$])|\$(?!\$)[^$]+\$(?!\$)"
+)
+
+
+def _decoded_escape_char(hex_digits: str) -> str | None:
+    """The char a 4-hex JSON escape decodes to; None for control chars
+    (C0/C1/DEL) which are never wanted in prose — they decode to nothing."""
+    cp = int(hex_digits, 16)
+    if cp < 0x20 or 0x7F <= cp <= 0x9F:
+        return None
+    return chr(cp)
+
+
+def _decode_escapes_in(text: str, counts: dict) -> str:
+    """Rule (a): decode every `\\u`+4-hex escape NOT followed by another hex
+    digit (case-insensitive). Each decoded escape increments
+    `counts["decoded_unicode_escapes"]`; an escape that decodes to a control
+    char (C0/C1/DEL) is removed, consuming at most ONE adjacent space so the
+    splice can never leave a double space (`a \\u0000 b` → `a b`). `\\u{…}` /
+    `\\u x` accent uses and 5+-hex runs never match. Input without `\\u` is
+    returned byte-identical."""
+    if "\\u" not in text:
+        return text
+    n = 0
+    dropped = 0
+
+    def _repl(m: re.Match) -> str:
+        nonlocal n, dropped
+        n += 1
+        trailing = m.group(2) or ""
+        ch = _decoded_escape_char(m.group(1))
+        if ch is not None:
+            return ch + trailing
+        dropped += 1
+        before = text[m.start() - 1] if m.start() > 0 else ""
+        if before.isspace():
+            return ""  # the leading space stays; consume the trailing one
+        return trailing  # no leading space: keep the trailing one
+
+    out = _UNICODE_ESCAPE_RE.sub(_repl, text)
+    if dropped:
+        # consecutive control escapes (\u0001\u0002) can still leave a doubled
+        # space behind; collapse the artifact so the splice stays clean
+        out = re.sub(r" {2,}", " ", out)
+    counts["decoded_unicode_escapes"] += n
+    return out
+
+
+def _decode_unicode_escapes_text(text: str, counts: dict) -> str:
+    """Decode JSON-style `\\uXXXX` escapes across a span text.
+
+    (a) `\\u` + exactly 4 hex digits (case-insensitive) + a following char
+        that is NOT another hex digit decodes to `chr(int(hex, 16))` — inside
+        AND outside math regions. `\\u{…}` / `\\u x` accent uses never match.
+    (b) when an ENTIRE `$…$` / `$$…$$` / `\\(…\\)` / `\\[…\\]` region is a
+        single escape (whitespace aside) the delimiters are unwrapped — the
+        decoded char is prose, not math (`$\\u2014$` → `—` in the span text).
+
+    Idempotent (decoded chars carry no `\\u` pattern; untouched 5+-hex runs
+    still fail the rule on a second pass); never raises.
+    """
+    if not text or "\\u" not in text:
+        return text
+    out: list[str] = []
+    last = 0
+    for m in _MATH_REGION_RE.finditer(text):
+        out.append(_decode_escapes_in(text[last:m.start()], counts))
+        region = m.group(0)
+        if region.startswith("\\"):
+            prefix = suffix = 2  # \( or \[
+        elif region.startswith("$$"):
+            prefix = suffix = 2
+        else:
+            prefix = suffix = 1  # single $…$
+        content = region[prefix : len(region) - suffix]
+        lone = _LONE_ESCAPE_RE.match(content.strip())
+        if lone:
+            # the whole region is ONE escape: unwrap the delimiters
+            ch = _decoded_escape_char(lone.group(1))
+            counts["decoded_unicode_escapes"] += 1
+            if ch is not None:
+                out.append(ch)
+                last = m.end()
+            else:
+                # control char: drop the whole region (delimiters included);
+                # consume at most one adjacent space so the splice can never
+                # leave a double space
+                before = text[m.start() - 1] if m.start() > 0 else ""
+                out.append("")
+                if before.isspace() and text[m.end() : m.end() + 1] == " ":
+                    last = m.end() + 1
+                else:
+                    last = m.end()
+            continue
+        out.append(region[:prefix] + _decode_escapes_in(content, counts) + region[-suffix:])
+        last = m.end()
+    out.append(_decode_escapes_in(text[last:], counts))
+    return "".join(out)
+
+
+def _decode_unicode_escapes(report: ResearchReport) -> int:
+    """Assembly-time defense against JSON-escape-in-math artifacts:
+    apply `_decode_unicode_escapes_text` to every prose text holder (span
+    text of all block types, list items, table cells, block-level text,
+    executive-summary paragraphs) plus equation-block bodies. Code blocks
+    are never touched (a `\\uXXXX` in a code sample is literal content).
+
+    Returns the total number of escapes decoded (lands in
+    `quality.verification.decoded_unicode_escapes`). Idempotent; never
+    raises.
+    """
+    counts = {"decoded_unicode_escapes": 0}
+    try:
+        for section in report.report.sections or []:
+            for block in section.blocks or []:
+                if block.type in (BlockType.code_block, "code_block"):
+                    continue  # code text: escapes are literal content
+                for span in block.spans or []:
+                    if isinstance(span, Span):
+                        span.text = _decode_unicode_escapes_text(span.text or "", counts)
+                for item in block.items or []:
+                    if isinstance(item, Span):
+                        item.text = _decode_unicode_escapes_text(item.text or "", counts)
+                for row in block.rows or []:
+                    if not isinstance(row, list):
+                        continue
+                    for i, cell in enumerate(row):
+                        if isinstance(cell, Span):
+                            row[i] = Span(
+                                text=_decode_unicode_escapes_text(cell.text or "", counts),
+                                citations=list(cell.citations),
+                            )
+                        elif isinstance(cell, str):
+                            row[i] = Span(
+                                text=_decode_unicode_escapes_text(cell, counts),
+                                citations=[],
+                            )
+                if block.type in (BlockType.equation, "equation"):
+                    if block.text:
+                        block.text = _decode_unicode_escapes_text(block.text or "", counts)
+                elif not (block.spans or []) and not (block.items or []):
+                    block.text = _decode_unicode_escapes_text(block.text or "", counts)
+
+        for i, para in enumerate(report.report.executive_summary or []):
+            if isinstance(para, str):
+                report.report.executive_summary[i] = _decode_unicode_escapes_text(para, counts)
+    except Exception:
+        logger.exception("unicode-escape decoding failed; continuing with escapes intact")
+    return counts["decoded_unicode_escapes"]
+
+
 def assemble_structured_report(
     *,
     sections: list,
@@ -769,6 +939,7 @@ def assemble_structured_report(
     _remap_citations_to_final_sources(report, registry)
     key_rewrite_counts = _rewrite_prose_source_keys(report, registry)
     norm_counts = _normalize_citation_marks(report)
+    decoded_escapes = _decode_unicode_escapes(report)
     _promote_bare_equation_spans(report)
     _wrap_undelimited_latex(report)
     _balance_equation_bodies(report)
@@ -785,6 +956,7 @@ def assemble_structured_report(
             "title_brackets_stripped": norm_counts["title_brackets_stripped"],
             "empty_brackets_removed": norm_counts["empty_brackets_removed"],
         },
+        "decoded_unicode_escapes": decoded_escapes,
     }
     if not_generated or orphan_gaps:
         gaps = list(report.quality.verification.get("gaps") or [])
