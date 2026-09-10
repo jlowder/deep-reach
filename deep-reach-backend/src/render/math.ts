@@ -75,6 +75,63 @@ export function katexStylesheet(): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * Decode one `\\uXXXX` hex value to its character, or null for a control
+ * char (C0/C1/DEL) that should vanish. Mirrors the worker's
+ * _decoded_escape_char: supplementary code points come back as a JS
+ * surrogate pair, so both halves ship in the output.
+ */
+function decodeUnicodeEscape(hex: string): string | null {
+  const cp = parseInt(hex, 16);
+  if (cp > 0xffff) {
+    const hi = 0xd800 + ((cp - 0x10000) >> 10);
+    const lo = 0xdc00 + ((cp - 0x10000) & 0x3ff);
+    return String.fromCharCode(hi, lo);
+  }
+  if (cp < 0x20 || cp === 0x7f || (cp >= 0x80 && cp <= 0x9f)) return null;
+  return String.fromCharCode(cp);
+}
+
+// `\\u` + EXACTLY 4 hex digits (case-insensitive) + a following char that is
+// NOT another hex digit. The optional trailing space is captured so a
+// control-char removal can consume at most one adjacent space and the splice
+// never doubles one. \\u{...} / \\u x accent uses never match.
+const UNICODE_ESCAPE_RE = /\\u([0-9a-fA-F]{4})(?![0-9a-fA-F])( )?/g;
+
+/**
+ * Rule (a) of the JSON-escape decode: every decodable `\\uXXXX` becomes its
+ * character (`\\u2014` → `—`, `\\u00e9` → é, `\\u2194` → ↔); control chars
+ * decode to nothing, consuming at most one adjacent space. Input without a
+ * `\\u` sequence is returned byte-identical with count 0. Idempotent: a
+ * decoded char is never re-matched (a real em dash has no backslash).
+ */
+export function decodeUnicodeEscapes(
+  tex: string,
+): { text: string; count: number } {
+  if (!tex.includes("\\u")) return { text: tex, count: 0 };
+  let count = 0;
+  let dropped = 0;
+  let out = "";
+  let last = 0;
+  for (const m of tex.matchAll(UNICODE_ESCAPE_RE)) {
+    count++;
+    const at = m.index ?? 0;
+    const trailing = m[2] ?? "";
+    const ch = decodeUnicodeEscape(m[1]);
+    out += tex.slice(last, at);
+    if (ch !== null) {
+      out += ch + trailing;
+    } else {
+      dropped++;
+      const before = at > 0 ? tex[at - 1] : "";
+      out += before && /\s/.test(before) ? "" : trailing;
+    }
+    last = at + m[0].length;
+  }
+  out += tex.slice(last);
+  if (dropped) out = out.replace(/ {2,}/g, " ");
+  return { text: out, count };
+}
+/**
  * Structural well-formedness gate applied before KaTeX ever sees a region.
  * Returns false when the tex has any of: an interior `$` (a mis-split
  * region), or unbalanced `{`/`}` (count mismatch, escaped pairs ignored). It
@@ -161,6 +218,12 @@ export type MathKind = "equation" | "inline";
  * Well-formed regions — including kets and norms — proceed to KaTeX; the
  * rare well-formed-but-KaTeX-rejects case still records `math: <message>`
  * in `warnings` and falls back.
+ *
+ * Before any of that, JSON-escape decode: a lone `\\uXXXX` whole region is
+ * returned as the decoded plain-text char (no katex span, no fallback) and
+ * everything else decodes every `\\u`+4-hex escape (`\\u2014` → `—`) with a
+ * `decoded N \\uXXXX unicode escape(s)…` warning, so the breve-on-2014
+ * artifact cannot reach KaTeX.
  */
 export function renderMath(
   tex: string,
@@ -168,6 +231,31 @@ export function renderMath(
   warnings: string[],
   kind: MathKind = "inline",
 ): string {
+  // A model thinking in JSON can emit a literal \\u2014 (backslash-u-2-0-1-4)
+  // inside a $...$ region meaning the em dash. KaTeX natively defines \\u as
+  // the breve accent, so \\u2014 typesets as "2"+bowl+"014" — the recovered
+  // Langlands report rendered 2014 that way on PDF page 11, all the way
+  // through the PDF text layer. A 4-hex run after \\u is unambiguously a
+  // JSON-escape mistake, never an intended accent, so decode before the gate
+  // and KaTeX; \\u{...} / \\u x (the real accent forms) never match.
+  if (tex.includes("\\u")) {
+    const lone = tex.trim().match(/^\\u([0-9a-fA-F]{4})(?![0-9a-fA-F])$/);
+    if (lone) {
+      // The whole equation is a single escape: prose, not math — return the
+      // decoded char as plain text, no katex span, no fallback.
+      warnings.push(
+        `${kind}: lone \\u${lone[1]} unicode escape is not math; rendered as plain text`,
+      );
+      return escapeHtml(decodeUnicodeEscape(lone[1]) ?? "");
+    }
+    const decoded = decodeUnicodeEscapes(tex);
+    if (decoded.count > 0) {
+      warnings.push(
+        `${kind}: decoded ${decoded.count} \\uXXXX unicode escape(s) that are not valid TeX`,
+      );
+      tex = decoded.text;
+    }
+  }
   if (!_isWellFormedMath(tex)) {
     if (kind === "equation") {
       warnings.push("math fallback: unbalanced braces in equation — showing raw LaTeX");
