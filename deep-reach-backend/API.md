@@ -126,7 +126,8 @@ kept and rendered as paragraphs when they carry text):
 Span `citations`: numbers are 1-based source indices, strings are
 `citation_key`s.
 
-**Math**: inline `$…$`, `\(…\)`, `\[…\]` in span text; `equation` blocks with
+**Math**: inline `$…$`, `\(…\)`, `\[…\]` in span text and table cells
+(including `comparison_table` column headers); `equation` blocks with
 `language: "latex"|"tex"`. KaTeX CSS *and all fonts* are inlined into the
 HTML, so renders work fully offline.
 
@@ -171,6 +172,11 @@ Non-fatal issues still produce a 200 body; the count is in
   native `\u` breve accent — the "2014 as 2+bowl+014" artifact)
 - `<equation|inline>: lone \uXXXX unicode escape is not math; rendered as plain
   text` (the whole region is a single escape — prose, not math)
+- `<equation|inline>: case-folded undefined command \NAME → \name` (an UPPERCASE
+  TeX command KaTeX does not define whose lowercase form does — e.g. `\VEE`,
+  `\MATHBB`; the model casing it like a LaTeX keyword. The token is rewritten
+  to the lowercase form before KaTeX and typesets; names undefined in both
+  cases such as `\MATHRBUN` are left untouched and fall back as before)
 
 ### Examples
 
