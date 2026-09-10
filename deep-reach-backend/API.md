@@ -165,6 +165,12 @@ Non-fatal issues still produce a 200 body; the count is in
 - `math fallback: unbalanced braces in equation — showing raw LaTeX` (a display
   equation that still fails the structural gate after brace balancing, e.g. an
   unmatched opener; the raw LaTeX is shown in a fallback span)
+- `<equation|inline>: decoded N \uXXXX unicode escape(s) that are not valid TeX`
+  (a model thinking in JSON emitted e.g. `\u2014` for the em dash inside a
+  math region; it is decoded before KaTeX, which would otherwise render the
+  native `\u` breve accent — the "2014 as 2+bowl+014" artifact)
+- `<equation|inline>: lone \uXXXX unicode escape is not math; rendered as plain
+  text` (the whole region is a single escape — prose, not math)
 
 ### Examples
 
