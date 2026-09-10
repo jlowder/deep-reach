@@ -142,3 +142,51 @@ test("a normal table still renders byte-identical", () => {
       '</tbody></table>',
   );
 });
+
+// ---------------------------------------------------------------------------
+// Column headers run through the same math pipeline as body cells (the
+// pre-fix gap: bare escapeHtml printed $-TeX verbatim in the PDF — task
+// 3614b2d6 page 9, 4 raw dollars).
+// ---------------------------------------------------------------------------
+
+test("table header with inline math typesets via KaTeX; no raw $ anywhere", () => {
+  // The real columns from the recovered Langlands report (task 3614b2d6).
+  const block: Block = {
+    type: "comparison_table",
+    caption: "The two sides of the geometric Langlands equivalence",
+    columns: [
+      "Left: geometry over $\\mathrm{Bun}_G$",
+      "Right: $G^\\vee$-local systems",
+    ],
+    rows: [
+      [
+        { text: "The moduli stack $\\mathrm{Bun}_G$", sourcePositions: [3] },
+        { text: "Local systems for $G^\\vee$", sourcePositions: [3] },
+      ],
+    ],
+  };
+  const warnings: string[] = [];
+  const html = renderBlock(block, { onWarning: (w) => warnings.push(w) });
+  const ths = [...html.matchAll(/<th>([\s\S]*?)<\/th>/g)].map((m) => m[1]!);
+  assert.equal(ths.length, 2, html);
+  assert.ok(ths[0]!.startsWith("Left: geometry over <span class=\"katex\">"), ths[0]);
+  assert.ok(ths[1]!.startsWith("Right: <span class=\"katex\">"), ths[1]);
+  assert.ok(!html.includes("$"), `no raw $ may survive anywhere: ${html}`);
+  assert.equal(warnings.length, 0, warnings.join(" | "));
+  // The same math in a body cell still typesets too.
+  assert.ok(html.includes("<td>The moduli stack <span class=\"katex\">"), html);
+});
+
+test("table header with broken math degrades to the fallback span, no $, warning surfaced", () => {
+  const block: Block = {
+    type: "comparison_table",
+    caption: "",
+    columns: ["Right: $\\MATHRBUN)_G$-local systems"],
+    rows: [[{ text: "plain cell", sourcePositions: [] }]],
+  };
+  const warnings: string[] = [];
+  const html = renderBlock(block, { onWarning: (w) => warnings.push(w) });
+  assert.ok(html.includes('class="math-fallback"'), html);
+  assert.ok(!html.includes("$"), html);
+  assert.ok(warnings.length > 0, "the failure must surface via onWarning");
+});

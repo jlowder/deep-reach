@@ -261,10 +261,16 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
       if (block.caption !== "") {
         parts.push(`<div class="table-caption">${escapeHtml(block.caption)}</div>`);
       }
-      const head = block.columns
-        .map((c) => `<th>${escapeHtml(c)}</th>`)
-        .join("");
       const warnings: string[] = [];
+      // Column headers run through the same math pipeline as body cells
+      // (renderMathText = the splitMath+renderMath pass without citation
+      // sups): a header containing `$…$` typesets via KaTeX, and a broken
+      // region degrades to the delimiter-free gray-mono fallback — never raw
+      // `$`-soup with visible delimiters (the pre-fix behavior was a bare
+      // escapeHtml, which printed the TeX verbatim in the PDF).
+      const head = block.columns
+        .map((c) => `<th>${renderMathText(c, warnings)}</th>`)
+        .join("");
       const rows = block.rows
         .map((row) => `<tr>${row.map((c) => renderTableCell(c, warnings)).join("")}</tr>`)
         .join("");
