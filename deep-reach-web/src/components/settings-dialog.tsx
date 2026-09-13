@@ -407,6 +407,37 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
     };
   }, [open, triggerRef]);
 
+  // Keyboard/trap hardening at document level. A control that becomes
+  // disabled mid-interaction (Save during/after the PUT) drops focus to
+  // <body> — outside the overlay — so a bubbling keydown handler on the
+  // panel would never see Esc. The document always does, and the focusin
+  // pull-back keeps the trap intact when focus escapes any other way.
+  const requestCloseRef = useRef(requestClose);
+  useEffect(() => {
+    requestCloseRef.current = requestClose;
+  });
+  useEffect(() => {
+    if (!open) return;
+    function onDocKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        requestCloseRef.current();
+      }
+    }
+    function onDocFocusIn(e: FocusEvent) {
+      const panel = panelRef.current;
+      if (panel && !panel.contains(e.target as Node)) {
+        (panel.querySelector<HTMLElement>("input, button:not([disabled]), [tabindex]") ?? panel).focus();
+      }
+    }
+    document.addEventListener("keydown", onDocKey, true);
+    document.addEventListener("focusin", onDocFocusIn);
+    return () => {
+      document.removeEventListener("keydown", onDocKey, true);
+      document.removeEventListener("focusin", onDocFocusIn);
+    };
+  }, [open]);
+
   // --- derived state ---------------------------------------------------------
 
   const dirty = useMemo(() => {
@@ -540,11 +571,8 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
   }
 
   function onKeyDown(e: ReactKeyboardEvent) {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      requestClose();
-      return;
-    }
+    // Esc is handled at document level (see above); only the Tab trap lives
+    // here, where the bubbling path is well-defined.
     if (e.key !== "Tab") return;
     const focusables = Array.from(
       panelRef.current?.querySelectorAll<HTMLElement>(
