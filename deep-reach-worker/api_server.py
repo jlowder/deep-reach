@@ -16,7 +16,14 @@ Routes:
     POST /research               start or queue a run -> 202 {task_id, links}
                                  (status "running" when the pipeline is
                                  free, "pending" when busy; FIFO queue)
-    GET  /research               -> 200 {tasks: [summaries]}
+    GET  /research               -> 200 {tasks: [summaries], queue: {paused,
+                                                                   pending}}
+    GET  /queue                  -> 200 {paused, pending, running} (in-memory;
+                                     resets to active on worker restart)
+    PUT  /queue                  -> {paused: bool}; pause holds the queue (new
+                                     runs stay pending even when idle), running
+                                     runs are unaffected; resume pumps FIFO
+                                     -> 200 queue shape / 400 non-bool
     GET  /research/{id}          -> 200 full record / 404 unknown task
     DELETE /research/{id}        -> 200 {deleted, documents} / 409 running /
                                     404 unknown task (removes the record +
@@ -29,6 +36,7 @@ Routes:
     GET  /documents              -> 200 {staged, on_disk, indexed}
     DELETE /documents            -> 200 {removed} (clears the staging area)
     GET  /health                 -> {service, running, pending,
+                                     queue: {paused, pending},
                                      deep_configured, settings}
     GET  /settings               -> dialog state (secrets as presence+
                                      source only, never key values)
@@ -131,17 +139,21 @@ class TaskRecord:
 
 
 def promote_next_pending(
-    tasks: dict[str, TaskRecord], lock: threading.Lock
+    tasks: dict[str, TaskRecord], lock: threading.Lock, paused: bool = False
 ) -> Optional[TaskRecord]:
     """Queue pump: atomically promote the oldest pending task to running.
 
     FIFO by creation order (the tasks dict is insertion-ordered). Returns
     the promoted record — the caller spawns its worker/watchdog threads —
-    or None if any task is still running or nothing is pending. The
-    running-check and the promotion happen together under `lock`, so
-    however many pumps race, a given task can be promoted at most once.
+    or None if paused, or if any task is still running, or nothing is
+    pending. All three checks happen together under `lock`, so however many
+    pumps race, a given task can be promoted at most once, and a pause
+    toggled at the same instant cannot slip a promotion past the check.
+    Pausing gates PROMOTION ONLY: already-running tasks never see the flag.
     """
     with lock:
+        if paused:
+            return None
         if any(t.status == "running" for t in tasks.values()):
             return None
         record = next((t for t in tasks.values() if t.status == "pending"), None)
@@ -211,6 +223,9 @@ def create_app(
 
     tasks: dict[str, TaskRecord] = {}
     lock = threading.Lock()
+    # Queue pause (in-memory only; resets to active on worker restart).
+    # Guarded by `lock`; gates promotion only — running tasks are untouched.
+    paused = False
     fn = run_fn if run_fn is not None else default_run_fn
     # Staged RAG documents (filename -> None, ordered by upload) awaiting
     # attachment to the next created research task. Guarded by `lock`.
@@ -372,11 +387,12 @@ def create_app(
     def _pump() -> None:
         """Start the oldest pending task now that a run has stopped.
 
-        Idempotent: promote_next_pending re-checks for a running task and
+        Idempotent: promote_next_pending re-checks pause + running and
         promotes under the lock, so racing pumps never double-start. The
-        threads are spawned after the lock is released.
+        threads are spawned after the lock is released. No-ops while the
+        queue is paused (the next resume pump drains the backlog).
         """
-        record = promote_next_pending(tasks, lock)
+        record = promote_next_pending(tasks, lock, paused=paused)
         if record is not None:
             _start_task(record, fn, record.topic, _budgets(record))
 
@@ -488,6 +504,7 @@ def create_app(
     def start_research(req: ResearchRequest):
         with lock:
             busy = any(t.status == "running" for t in tasks.values())
+            holding = paused
             record = TaskRecord(
                 id=uuid.uuid4().hex,
                 topic=req.topic,
@@ -495,9 +512,10 @@ def create_app(
                 budget_doc=req.budget_doc,
                 budget_web=req.budget_web,
             )
-            if busy:
+            if busy or holding:
                 # Queue it (FIFO): no thread yet. The pump promotes it to
-                # "running" when the pipeline becomes free.
+                # "running" when the pipeline becomes free — and the queue
+                # is paused, which holds it pending even when idle.
                 record.status = "pending"
             # Attach whatever is staged to this task (and only this task),
             # then clear the staging area for the next request.
@@ -506,7 +524,7 @@ def create_app(
                 staged_documents.clear()
             # Pipeline free: keep the "running" default; start below.
             tasks[record.id] = record
-        if not busy:
+        if not busy and not holding:
             _start_task(record, fn, req.topic, _budgets(record))
 
         return {
@@ -526,7 +544,11 @@ def create_app(
     @app.get("/research")
     def list_research():
         with lock:
-            return {"tasks": [_summary(t) for t in tasks.values()]}
+            pending = sum(1 for t in tasks.values() if t.status == "pending")
+            return {
+                "tasks": [_summary(t) for t in tasks.values()],
+                "queue": {"paused": paused, "pending": pending},
+            }
 
     @app.get("/research/{task_id}")
     def get_research(task_id: str):
@@ -586,6 +608,52 @@ def create_app(
             _cleanup_documents(record)
         return {"deleted": task_id, "documents": docs}
 
+    # ------------------------------------------------------------------
+    # Queue pause (in-memory only; resets to active on worker restart).
+    # While paused, new runs stay pending even when the pipeline is idle;
+    # already-running tasks are never affected (the flag gates promotion
+    # only). Resuming pumps the backlog FIFO from the next promotion.
+    # ------------------------------------------------------------------
+
+    def _queue_view() -> dict:
+        with lock:
+            return {
+                "paused": paused,
+                "pending": sum(1 for t in tasks.values() if t.status == "pending"),
+                "running": any(t.status == "running" for t in tasks.values()),
+            }
+
+    @app.get("/queue")
+    def get_queue():
+        return _queue_view()
+
+    @app.put("/queue")
+    async def put_queue(req: Request):
+        nonlocal paused
+        try:
+            payload = await req.json()
+        except Exception:
+            return JSONResponse(
+                {"error": "invalid queue payload", "details": ["body must be a JSON object"]},
+                status_code=400,
+            )
+        if not isinstance(payload, dict) or "paused" not in payload or not isinstance(
+            payload["paused"], bool
+        ):
+            return JSONResponse(
+                {"error": "invalid queue payload", "details": ["paused must be a boolean"]},
+                status_code=400,
+            )
+        new = payload["paused"]
+        with lock:
+            changing = paused != new
+            paused = new
+        if changing and not new:
+            # Resume: drain the backlog from the next promotion (no-op when
+            # a run is still in flight or nothing is queued).
+            _pump()
+        return _queue_view()
+
     @app.get("/research/{task_id}/report")
     def get_report(task_id: str):
         with lock:
@@ -618,6 +686,7 @@ def create_app(
         with lock:
             running = any(t.status == "running" for t in tasks.values())
             pending = sum(1 for t in tasks.values() if t.status == "pending")
+            queue_paused = paused
         try:
             cfg = get_config()
             deep_configured = bool(
@@ -630,6 +699,7 @@ def create_app(
             "service": SERVICE_NAME,
             "running": running,
             "pending": pending,
+            "queue": {"paused": queue_paused, "pending": pending},
             "deep_configured": deep_configured,
             "settings": _health_settings(),
         }
