@@ -919,3 +919,212 @@ def test_report_409_when_completed_without_artifact():
     body = resp.json()
     assert body["error"] == "no report artifact — the run produced no report"
     assert body["status"] == "completed"
+
+# ---------------------------------------------------------------------------
+# Queue pause (in-memory only; resets on restart by construction)
+# ---------------------------------------------------------------------------
+
+
+def _started_recording_run_fn(delay: float = 0.15):
+    started = []
+    started_lock = threading.Lock()
+
+    def run_fn(topic, **kwargs):
+        with started_lock:
+            started.append(topic)
+        time.sleep(delay)
+        return {
+            "final_answer": f"done {topic}",
+            "state": {"report_json": _fake_report_json(topic)},
+            "stats": {"llm_calls": 1},
+        }
+
+    run_fn.started = started
+    return run_fn
+
+
+def test_pause_idle_holds_new_runs_pending():
+    """(a) POST while paused with nothing running -> 202 pending, and it
+    STAYS pending (no started_at reset, no running) even after a long settle."""
+    client = TestClient(
+        api_server.create_app(run_fn=_make_fake_run_fn(), max_run_seconds=5)
+    )
+    assert client.put("/queue", json={"paused": True}).json()["paused"] is True
+    r = client.post("/research", json={"topic": "queued-while-paused"})
+    assert r.status_code == 202
+    body = r.json()
+    assert body["status"] == "pending"
+    tid = body["task_id"]
+    created_at = client.get(f"/research/{tid}").json()["started_at"]
+    time.sleep(0.5)  # settle: plenty of pump windows, pipeline fully idle
+    last = client.get(f"/research/{tid}").json()
+    assert last["status"] == "pending"
+    assert last["current_step"] == "queued"
+    assert last["started_at"] == created_at  # never promoted
+    assert client.get("/queue").json()["running"] is False
+
+
+def test_pause_queues_multiple_posts():
+    """(b) two posts while paused -> both pending."""
+    client = TestClient(
+        api_server.create_app(run_fn=_make_fake_run_fn(), max_run_seconds=5)
+    )
+    client.put("/queue", json={"paused": True})
+    ids = []
+    for i in (1, 2):
+        r = client.post("/research", json={"topic": f"q{i}"})
+        assert r.status_code == 202
+        assert r.json()["status"] == "pending"
+        ids.append(r.json()["task_id"])
+    q = client.get("/queue").json()
+    assert q == {"paused": True, "pending": 2, "running": False}
+
+
+def test_pause_does_not_affect_running_task():
+    """(c) start (unpaused) -> pause mid-run -> the running task completes
+    normally with its report; only promotion is gated."""
+    client = TestClient(
+        api_server.create_app(run_fn=_make_fake_run_fn(), max_run_seconds=5)
+    )
+    tid = client.post("/research", json={"topic": "in-flight"}).json()["task_id"]
+    _wait_for(lambda: client.get(f"/research/{tid}").json()["status"] == "running")
+    r = client.put("/queue", json={"paused": True})
+    assert r.status_code == 200
+    assert r.json()["running"] is True  # still running while paused
+    done = _wait(client, tid)
+    assert done["status"] == "completed"
+    rep = client.get(f"/research/{tid}/report")
+    assert rep.status_code == 200
+    assert rep.json()["report"]["metadata"]["topic"] == "in-flight"
+
+
+def test_resume_drains_queue_fifo():
+    """(d) two queued while paused; resume -> they start in POST order and
+    both complete."""
+    run_fn = _started_recording_run_fn()
+    client = TestClient(
+        api_server.create_app(run_fn=run_fn, max_run_seconds=5)
+    )
+    client.put("/queue", json={"paused": True})
+    ids = [
+        client.post("/research", json={"topic": t}).json()["task_id"]
+        for t in ("early", "late")
+    ]
+    assert client.get("/queue").json()["pending"] == 2
+    assert client.put("/queue", json={"paused": False}).json() == {
+        "paused": False,
+        "pending": 1,
+        "running": True,
+    }
+    for tid in ids:
+        _wait(client, tid)
+    assert run_fn.started == ["early", "late"]
+    early = client.get(f"/research/{ids[0]}").json()
+    late = client.get(f"/research/{ids[1]}").json()
+    assert early["started_at"] < late["started_at"]
+
+
+def test_completion_while_paused_does_not_start_next():
+    """(e) a run that was STARTED unpaused finishes while the queue is
+    paused; the pump fires on completion but must hold — the queued task
+    stays pending (no promotion) until resume."""
+    run_fn = _started_recording_run_fn()
+    client = TestClient(api_server.create_app(run_fn=run_fn, max_run_seconds=5))
+    a = client.post("/research", json={"topic": "a"}).json()["task_id"]
+    _wait_for(lambda: client.get(f"/research/{a}").json()["status"] == "running")
+    client.put("/queue", json={"paused": True})
+    b = client.post("/research", json={"topic": "b"}).json()["task_id"]
+    created_b = client.get(f"/research/{b}").json()["started_at"]
+    _wait(client, a)
+    time.sleep(0.5)  # a's completion pump had its chance
+    last_b = client.get(f"/research/{b}").json()
+    assert last_b["status"] == "pending"
+    assert last_b["started_at"] == created_b
+    assert [t for t in run_fn.started if t != "a"] == []
+    client.put("/queue", json={"paused": False})
+    done = _wait(client, b)
+    assert done["status"] == "completed"
+    assert run_fn.started == ["a", "b"]
+
+
+def test_queue_get_shape_and_put_validation():
+    """(f) GET /queue shape; PUT accepts true/false, 400s on garbage."""
+    client = TestClient(
+        api_server.create_app(run_fn=_make_fake_run_fn(), max_run_seconds=5)
+    )
+    q = client.get("/queue").json()
+    assert q == {"paused": False, "pending": 0, "running": False}
+
+    ok_t = client.put("/queue", json={"paused": True})
+    assert ok_t.status_code == 200 and ok_t.json()["paused"] is True
+    ok_f = client.put("/queue", json={"paused": False})
+    assert ok_f.status_code == 200 and ok_f.json()["paused"] is False
+
+    for garbage in ("yes", 1, 0, None, ["true"]):
+        r = client.put("/queue", json=garbage)
+        assert r.status_code == 400, f"{garbage!r} -> {r.status_code}"
+    for garbage in ({"paused": "yes"}, {"paused": 1}, {"pause": True}, {}):
+        r = client.put("/queue", json=garbage)
+        assert r.status_code == 400, f"{garbage!r} -> {r.status_code}"
+        assert "paused must be a boolean" in r.json()["details"]
+    # non-object / non-JSON bodies
+    assert (
+        client.put(
+            "/queue",
+            content=b"not json",
+            headers={"content-type": "application/json"},
+        ).status_code
+        == 400
+    )
+    assert (
+        client.put(
+            "/queue", content=b"[true]", headers={"content-type": "application/json"}
+        ).status_code
+        == 400
+    )
+    assert client.get("/queue").json()["paused"] is False  # untouched
+
+
+def test_pause_fields_on_list_and_health():
+    """(g) GET /research carries queue.{paused,pending}; /health nests the
+    same under queue with existing top-level keys intact."""
+    client = TestClient(
+        api_server.create_app(run_fn=_make_fake_run_fn(), max_run_seconds=5)
+    )
+    listed = client.get("/research").json()
+    assert listed["queue"] == {"paused": False, "pending": 0}
+    health = client.get("/health").json()
+    assert health["queue"] == {"paused": False, "pending": 0}
+    for key in ("service", "running", "pending", "deep_configured", "settings"):
+        assert key in health
+
+    client.put("/queue", json={"paused": True})
+    tid = client.post("/research", json={"topic": "p"}).json()["task_id"]
+    listed = client.get("/research").json()
+    assert listed["queue"] == {"paused": True, "pending": 1}
+    assert listed["tasks"][0]["status"] == "pending"
+    assert client.get("/health").json()["queue"] == {"paused": True, "pending": 1}
+    # resume while the (nonexistent) backlog drains; leave unpaused
+    client.put("/queue", json={"paused": False})
+    _wait(client, tid)
+
+
+def test_delete_pending_while_paused_keeps_pause():
+    """(h) DELETE a queued task while paused -> 200; pause flag untouched,
+    pending count drops."""
+    client = TestClient(
+        api_server.create_app(run_fn=_make_fake_run_fn(), max_run_seconds=5)
+    )
+    client.put("/queue", json={"paused": True})
+    a = client.post("/research", json={"topic": "keep"}).json()["task_id"]
+    b = client.post("/research", json={"topic": "drop"}).json()["task_id"]
+    assert client.get("/queue").json()["pending"] == 2
+    r = client.delete(f"/research/{b}")
+    assert r.status_code == 200
+    q = client.get("/queue").json()
+    assert q == {"paused": True, "pending": 1, "running": False}
+    assert client.get(f"/research/{a}").json()["status"] == "pending"
+    assert client.delete(f"/research/{a}").status_code == 200
+    # cleanup: leave unpaused with an empty queue
+    client.put("/queue", json={"paused": False})
+    assert client.get("/queue").json() == {"paused": False, "pending": 0, "running": False}
