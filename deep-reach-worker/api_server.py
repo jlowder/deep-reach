@@ -859,6 +859,8 @@ def _test_llm(form: dict, eff: dict) -> dict:
             )
             snippet = (getattr(resp, "output_text", None) or "")[:80]
             return done(True, snippet=snippet)
+        finally:
+            client.close()
     except Exception as e:
         return done(False, error=f"{type(e).__name__}: {e}")
 
@@ -919,12 +921,15 @@ def _test_embedding(form: dict, eff: dict) -> dict:
         from openai import OpenAI
 
         client = OpenAI(base_url=endpoint.rstrip("/"), api_key=key, timeout=30.0, max_retries=0)
-        r = client.embeddings.create(model=model, input="hello")
-        return {
-            "ok": True,
-            "latency_ms": int((time.monotonic() - started) * 1000),
-            "dim": len(r.data[0].embedding),
-        }
+        try:
+            r = client.embeddings.create(model=model, input="hello")
+            return {
+                "ok": True,
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "dim": len(r.data[0].embedding),
+            }
+        finally:
+            client.close()
     except Exception as e:
         return {
             "ok": False,
