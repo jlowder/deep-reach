@@ -22,7 +22,9 @@ from utils.config import reset_config
 logger = logging.getLogger(__name__)
 
 UTILS_DIR = Path(__file__).resolve().parent
-VAR_ENV_PATH = UTILS_DIR / "var.env"
+# DEEP_REACH_VAR_ENV lets a dev/test instance read a different env file;
+# the default is the repo's utils/var.env.
+VAR_ENV_PATH = Path(os.environ.get("DEEP_REACH_VAR_ENV", UTILS_DIR / "var.env"))
 
 # Non-secret settings managed by the dialog (live in var.env).
 NON_SECRET_VARS = (

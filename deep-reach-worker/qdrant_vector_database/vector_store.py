@@ -25,9 +25,9 @@ similarity search and the indexed document catalog used by the retriever.
 """
 
 UTILS_DIR = Path(__file__).resolve().parents[1] / "utils"
-ENV_FILE_PATH = UTILS_DIR / "var.env"
-QDRANT_STORAGE_PATH = UTILS_DIR / "qdrant_storage"
-INDEXED_DOCUMENTS_PATH = UTILS_DIR / "indexed_documents.json"
+ENV_FILE_PATH = Path(os.environ.get("DEEP_REACH_VAR_ENV", UTILS_DIR / "var.env"))
+QDRANT_STORAGE_PATH = Path(os.environ.get("QDRANT_STORAGE_PATH", UTILS_DIR / "qdrant_storage"))
+INDEXED_DOCUMENTS_PATH = Path(os.environ.get("DEEP_REACH_INDEXED_DOCS", UTILS_DIR / "indexed_documents.json"))
 DEFAULT_DOCS_DIR = UTILS_DIR.parent / "docs"
 
 load_dotenv(ENV_FILE_PATH)
