@@ -50,6 +50,9 @@ async function route(method: string, path: string, req: Request): Promise<Respon
     if (method === "POST") return postDocuments(req);
     if (method === "DELETE") return deleteDocuments(clientSignal(req));
   }
+  if (path === "/settings" && method === "GET") return getSettings(clientSignal(req));
+  if (path === "/settings" && method === "PUT") return putSettings(req);
+  if (path === "/settings/test" && method === "POST") return postSettingsTest(req);
 
   const segs = path.split("/").filter((s) => s.length > 0);
   if ((method === "GET" || method === "DELETE") && segs[0] === "research" && segs.length >= 2) {
@@ -201,6 +204,9 @@ function getIndex(): Response {
       "GET /documents",
       "POST /documents",
       "DELETE /documents",
+      "GET /settings",
+      "PUT /settings",
+      "POST /settings/test",
       "GET /health",
     ],
   });
@@ -435,6 +441,47 @@ async function deleteDocuments(signal: AbortSignal | undefined): Promise<Respons
     const { status, data } = await upstreamJson("worker", "/documents", {
       method: "DELETE",
       signal,
+    });
+    return jsonResponse(data, status);
+  });
+}
+
+// --- /settings (dialog backend, proxied to the worker) ---------------------
+//
+// Pure JSON passthrough both directions, mirroring the documents handlers:
+// the worker's status and JSON error bodies (400 validation / 503 no keyring
+// / 200 ok:false test results) reach the client verbatim. No auth — same
+// posture as /documents; the web calls same-origin /api/* via the Next rewrite.
+
+async function getSettings(signal: AbortSignal | undefined): Promise<Response> {
+  return guard("worker", async () => {
+    // The worker reports keys as presence+source only — never key material.
+    const { status, data } = await upstreamJson("worker", "/settings", { signal });
+    return jsonResponse(data, status);
+  });
+}
+
+async function putSettings(req: Request): Promise<Response> {
+  return guard("worker", async () => {
+    const ct = req.headers.get("content-type") ?? "application/json";
+    const { status, data } = await upstreamJson("worker", "/settings", {
+      method: "PUT",
+      headers: { "content-type": ct },
+      body: req.body,
+      signal: clientSignal(req),
+    });
+    return jsonResponse(data, status);
+  });
+}
+
+async function postSettingsTest(req: Request): Promise<Response> {
+  return guard("worker", async () => {
+    const ct = req.headers.get("content-type") ?? "application/json";
+    const { status, data } = await upstreamJson("worker", "/settings/test", {
+      method: "POST",
+      headers: { "content-type": ct },
+      body: req.body,
+      signal: clientSignal(req),
     });
     return jsonResponse(data, status);
   });

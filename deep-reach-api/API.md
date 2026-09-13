@@ -53,6 +53,9 @@ the server binds, with a message naming the variable.
 | GET    | `/documents`             | Worker staging state: {staged, on_disk, indexed} (passthrough)     |
 | POST   | `/documents`             | Stage PDFs (multipart `files`) for the next research task (raw passthrough) |
 | DELETE | `/documents`             | Unstage all staged documents (passthrough)                         |
+| GET    | `/settings`              | Worker dialog state — keys as presence+source, never values (passthrough) |
+| PUT    | `/settings`              | Save settings; hot-applies to the next worker run (status + body passthrough) |
+| POST   | `/settings/test`         | One-shot llm/search/embedding check against the worker (status + body passthrough) |
 | GET    | `/health`                | Probe both upstreams in parallel; always 200                     |
 | GET    | `/`                      | Service index                                                     |
 
@@ -84,6 +87,9 @@ upstream contact. Trailing slashes are normalized (`/research/` routes to
     "GET /documents",
     "POST /documents",
     "DELETE /documents",
+    "GET /settings",
+    "PUT /settings",
+    "POST /settings/test",
     "GET /health"
   ]
 }
