@@ -9,6 +9,8 @@ import { useRef, useState } from "react";
 import { ApiError, api } from "@/lib/api";
 import { cx } from "@/lib/cx";
 import { ThemeToggle } from "@/lib/theme";
+import { SettingsButton } from "@/components/settings-dialog";
+import type { RefObject } from "react";
 
 type ChipState = "uploading" | "staged" | "error";
 
@@ -24,11 +26,14 @@ interface RailProps {
   runningCount: number;
   /** called with the new task id after a successful create */
   onCreated: (id: string) => void;
+  onOpenSettings: () => void;
+  /** the settings gear — the dialog refocuses it on close */
+  settingsTriggerRef: RefObject<HTMLButtonElement | null>;
 }
 
 let chipSeq = 0;
 
-export function Rail({ pendingCount, runningCount, onCreated }: RailProps) {
+export function Rail({ pendingCount, runningCount, onCreated, onOpenSettings, settingsTriggerRef }: RailProps) {
   const [open, setOpen] = useState(false); // mobile collapse (below 960px)
   const fileRef = useRef<HTMLInputElement>(null);
   const [topic, setTopic] = useState("");
@@ -283,7 +288,10 @@ export function Rail({ pendingCount, runningCount, onCreated }: RailProps) {
         </div>
 
         <div className="mt-auto border-t border-hairline pt-6">
-          <ThemeToggle />
+          <div className="flex items-center gap-3">
+            <ThemeToggle className="flex-1" />
+            <SettingsButton onClick={onOpenSettings} buttonRef={settingsTriggerRef} />
+          </div>
         </div>
       </div>
     </aside>

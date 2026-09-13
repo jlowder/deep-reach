@@ -4,10 +4,11 @@
 // useTasks (2 s poll of GET /research) + useTaskDetail (1.5 s poll for the
 // selected pending/running task).
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { EmptyState } from "@/components/empty-state";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { Rail } from "@/components/rail";
+import { SettingsDialog } from "@/components/settings-dialog";
 import { TaskDetail } from "@/components/task-detail";
 import { TaskList } from "@/components/task-list";
 import { UpstreamBanner } from "@/components/upstream-banner";
@@ -17,6 +18,20 @@ import { useTaskDetail, useTasks } from "@/lib/useTasks";
 export default function Page() {
   const { tasks, error, lastUpdate, refresh, removeTask } = useTasks();
   const [explicitId, setExplicitId] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsTrigger = useRef<HTMLButtonElement>(null);
+
+  // ⌘, (or Ctrl+, on Linux) opens settings, VS Code-style.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        setSettingsOpen(true);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   // Selection: an explicit pick if it still exists, else the running task,
   // else the first. Pure derivation — no effect, no stale state.
@@ -52,6 +67,8 @@ export default function Page() {
           setExplicitId(id);
           void refresh();
         }}
+        onOpenSettings={() => setSettingsOpen(true)}
+        settingsTriggerRef={settingsTrigger}
       />
 
       <main className="flex min-w-0 flex-col">
@@ -96,6 +113,14 @@ export default function Page() {
         )}
       </main>
     </div>
+
+      {settingsOpen && (
+        <SettingsDialog
+          open
+          onClose={() => setSettingsOpen(false)}
+          triggerRef={settingsTrigger}
+        />
+      )}
     </ErrorBoundary>
   );
 }
