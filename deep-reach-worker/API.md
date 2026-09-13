@@ -24,18 +24,20 @@ The service needs the LLM configuration from `utils/var.env` (`LLM_ENDPOINT`, `L
 
 ```bash
 curl -s localhost:8321/health
-# {"service":"multi-agent-rag-researcher","running":false,"pending":0,"deep_configured":true}
+# {"service":"multi-agent-rag-researcher","running":false,"pending":0,"queue":{"paused":false,"pending":0},"deep_configured":true}
 ```
 
 ## Endpoints
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| POST | `/research` | Start or queue a run → 202 with task id (queued as `pending` while one is running, 422 on invalid body) |
-| GET | `/research` | List all tasks (summaries) |
+| POST | `/research` | Start or queue a run → 202 with task id (queued as `pending` while one is running — or while the queue is paused — 422 on invalid body) |
+| GET | `/research` | List all tasks (summaries) + queue state |
 | GET | `/research/{id}` | Full task record: status, current_step, step timeline, stats |
 | DELETE | `/research/{id}` | Remove a queued/finished task → 200 {deleted, documents} (409 while running, 404 unknown) |
 | GET | `/research/{id}/report` | Raw structured report JSON once completed |
+| GET | `/queue` | Queue state → {paused, pending, running} (in-memory; resets on restart) |
+| PUT | `/queue` | Pause / resume the queue → 200 queue shape (400 on non-boolean `paused`) |
 | GET | `/health` | Service status, incl. whether the deep pipeline is configured |
 | POST | `/documents` | Stage PDF files for the next research task → 201 {documents, rejected} (400 if all rejected) |
 | GET | `/documents` | {staged, on_disk, indexed} |
@@ -97,7 +99,8 @@ Other responses:
       "finished_at": null,
       "error": null
     }
-  ]
+  ],
+  "queue": {"paused": false, "pending": 1}
 }
 ```
 
@@ -191,14 +194,37 @@ pump — the queue advances only when the zombie truly stops.
 - 409, when completed **but the run produced no report** (a pipeline exit that never assembled one): `{"error": "no report artifact — the run produced no report", "status": "completed"}` — this endpoint never serves a bare `null` 200
 - 404, unknown id: `{"error": "unknown task: <id>"}`
 
+### Queue pause — GET /queue, PUT /queue
+
+Runs are serialized on a single pipeline: at most one task runs at a time, the rest wait as `pending` (FIFO). The queue can be **paused** — `PUT /queue {"paused": true}` — with these semantics:
+
+- **New runs stay `pending` even when the pipeline is idle.** Pausing gates *promotion*, not posting: `POST /research` still returns the usual 202, but nothing starts.
+- **Already-running tasks are unaffected.** The flag is consulted only when the pump promotes a pending task, so an in-flight run runs to completion (or failure) exactly as unpaused.
+- **Completion while paused does not start the next run.** The after-completion pump fires but is gated, so the backlog waits until resume.
+- **Resume** (`{"paused": false}`) pumps immediately: the oldest queued task starts as the pipeline frees, the rest drain FIFO in POST order.
+
+The flag is **in-memory only** and resets to active on worker restart (the task store is in-memory, so the pending backlog is lost on restart regardless).
+
+```bash
+curl -s localhost:8321/queue
+# {"paused": false, "pending": 2, "running": true}
+
+curl -s -X PUT localhost:8321/queue -H 'content-type: application/json' -d '{"paused": true}'
+# {"paused": true, "pending": 2, "running": true}
+```
+
+`PUT /queue` requires `{"paused": <boolean>}`; anything else (missing key, string, number, non-object body) → `400 {"error": "invalid queue payload", "details": ["paused must be a boolean"]}`. The `queue` object (without `running`, in the list body: `{paused, pending}`) also appears in `GET /research` and nested in `/health` beside its existing top-level counts.
+
 ### GET /health
 
 ```json
-{"service": "multi-agent-rag-researcher", "running": false, "pending": 0, "deep_configured": true,
+{"service": "multi-agent-rag-researcher", "running": false, "pending": 0,
+ "queue": {"paused": false, "pending": 0},
+ "deep_configured": true,
  "settings": {"keyring_available": true, "llm_key_present": true, "search_tool": "searxng"}}
 ```
 
-`running` is true while any task is executing; `pending` is the count of queued (not yet started) tasks; `deep_configured` is true when the config has both an endpoint and an API key; `settings` is the cheap dialog summary (keyring backend availability, LLM key presence, active search tool).
+`running` is true while any task is executing; `pending` is the count of queued (not yet started) tasks; `queue` nests the pause state beside those counts (`{paused, pending}`); `deep_configured` is true when the config has both an endpoint and an API key; `settings` is the cheap dialog summary (keyring backend availability, LLM key presence, active search tool).
 
 ## Settings (dialog backend)
 
@@ -291,6 +317,8 @@ pending ──▶ running ──▶ completed   pipeline returns a report; stats
 - **completed / failed** — terminal; the worker's exit triggers the pump, which starts the oldest pending task.
 
 Queue advance semantics: the pump runs when a run has **truly stopped** (its run thread has returned and released the pipeline's process lock). Known limitation: Python threads cannot be killed. A run the watchdog has marked failed keeps executing in the background until the pipeline finishes on its own — and the queue advances only at that moment, not when the watchdog fired. Because a queued run can only start after the in-progress one has fully released, a long zombie run simply delays queued tasks; it cannot wedge them permanently.
+
+**Pause** (`PUT /queue {"paused": true}`) gates the promotion itself: while paused the `pending → running` arrow is disabled — even when nothing is running — so new runs accumulate as `pending` and a finishing run does not start the next one. In-flight runs are never affected (the flag is consulted only by the pump), and resume re-arms the pump, draining the backlog FIFO. The flag is in-memory only and resets to active on worker restart.
 
 ## Documents (RAG staging)
 
