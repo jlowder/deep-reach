@@ -29,7 +29,14 @@ Routes:
     GET  /documents              -> 200 {staged, on_disk, indexed}
     DELETE /documents            -> 200 {removed} (clears the staging area)
     GET  /health                 -> {service, running, pending,
-                                     deep_configured}
+                                     deep_configured, settings}
+    GET  /settings               -> dialog state (secrets as presence+
+                                     source only, never key values)
+    PUT  /settings               -> save; hot-applies to the NEXT run
+                                     (embeddings report requires_restart)
+    POST /settings/test          -> live one-shot check of llm / search /
+                                     embedding (uses provided form values,
+                                     else saved settings)
 
 Staged documents (POST /documents) are attached to the next created
 research task, ingested into the vector store at task start, and removed
@@ -42,14 +49,17 @@ Environment:  PORT (default 8321), HOST (default 0.0.0.0)
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -61,7 +71,10 @@ from qdrant_vector_database.vector_store import (
     ingest_documents,
     reconcile_corpus,
 )
+from utils import settings as settings_store
 from utils.config import get_config
+
+logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "multi-agent-rag-researcher"
 
@@ -183,7 +196,7 @@ def create_app(
     deep_research pipeline is used. max_run_seconds bounds each run via a
     per-task watchdog thread (exceeded runs are marked failed).
     """
-    app = FastAPI(title=f"{SERVICE_NAME} API")
+    app = FastAPI(title=f"{SERVICE_NAME} API", lifespan=lifespan)
 
     # Permissive CORS so browser-based clients (HTML API testers, web
     # front-ends) work out of the box. CORSMiddleware answers OPTIONS
@@ -618,9 +631,311 @@ def create_app(
             "running": running,
             "pending": pending,
             "deep_configured": deep_configured,
+            "settings": _health_settings(),
         }
 
+    # ------------------------------------------------------------------
+    # Settings dialog (web -> glue -> worker). Secrets are never echoed:
+    # presence + source only. Non-secrets live in utils/var.env; keys in
+    # the OS keyring (env fallback; no plaintext-file persistence).
+    # ------------------------------------------------------------------
+
+    @app.get("/settings")
+    def get_settings():
+        return settings_store.settings_view()
+
+    @app.put("/settings")
+    async def put_settings(req: Request):
+        try:
+            payload = await req.json()
+        except Exception:
+            return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+
+        details = _validate_settings_payload(payload)
+        if details:
+            return JSONResponse({"error": "invalid settings", "details": details}, status_code=400)
+
+        non_secret: dict[str, str] = {}
+        llm = payload.get("llm") or {}
+        for field, var in (("endpoint", "LLM_ENDPOINT"), ("model", "LLM_MODEL"), ("thinking", "LLM_ENABLE_THINKING")):
+            if field in llm:
+                non_secret[var] = "true" if llm[field] is True else ("false" if llm[field] is False else str(llm[field]))
+        search = payload.get("search") or {}
+        for field, var in (("tool", "SEARCH_TOOL"), ("searxng_url", "SEARXNG_URL"), ("throttle_ms", "SEARCH_THROTTLE_MS")):
+            if field in search:
+                non_secret[var] = str(search[field])
+        emb = payload.get("embeddings") or {}
+        for field, var in (("endpoint", "EMBEDDING_ENDPOINT"), ("model", "EMBEDDING_MODEL")):
+            if field in emb:
+                non_secret[var] = str(emb[field])
+
+        keys = payload.get("keys") or {}
+        key_map = {"llm": "llm-api-key", "tavily": "tavily-api-key", "embedding": "embedding-api-key"}
+        file = settings_store.read_var_env()
+        for provided, secret in key_map.items():
+            if provided not in keys:
+                continue
+            value = str(keys[provided])
+            env_name = settings_store.SECRETS[secret]
+            try:
+                settings_store.set_secret(secret, value)
+            except settings_store.SettingsError as e:
+                return JSONResponse({"error": str(e)}, status_code=503)
+            raw = file.get(env_name)
+            if raw is not None and (value or not settings_store.is_unset(raw)):
+                # Stored (or deleted) in the keyring: retire any plaintext
+                # file copy so a fresh process cannot resurrect it.
+                settings_store.write_managed_vars({env_name: ""})
+
+        if non_secret:
+            settings_store.write_managed_vars(non_secret)
+        settings_store.reload_settings()  # hot-apply: next run uses new values
+        return {**settings_store.settings_view(), "applied": True, "errors": []}
+
+    @app.post("/settings/test")
+    async def test_settings(req: Request):
+        try:
+            payload = await req.json()
+        except Exception:
+            return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
+        target = payload.get("target")
+        if target not in ("llm", "search", "embedding"):
+            return JSONResponse({"error": "target must be 'llm', 'search' or 'embedding'"}, status_code=400)
+        form = payload.get(target)
+        if form is None:
+            form = {}
+        if not isinstance(form, dict):
+            return JSONResponse({"error": f"{target} must be an object"}, status_code=400)
+        eff = settings_store.effective_settings()
+        if target == "llm":
+            return _test_llm(form, eff)
+        if target == "search":
+            return _test_search(form, eff)
+        return _test_embedding(form, eff)
+
     return app
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Worker startup: idempotently migrate live plaintext var.env secrets
+    into the OS keyring (blanks the file lines). Never fatal — a failed
+    migration degrades to the environment path with a warning."""
+    try:
+        moved = settings_store.migrate_plaintext_secrets()
+        if moved:
+            logger.info("settings: startup migration moved %s into the OS keyring", ", ".join(moved))
+    except Exception as e:
+        logger.warning("settings: startup migration failed: %s", e)
+    yield
+
+
+def _health_settings() -> dict:
+    """Cheap settings summary for /health; never fails the health probe."""
+    try:
+        avail, _ = settings_store.keyring_available()
+        llm_key, _ = settings_store.get_secret("llm-api-key")
+        search_tool = settings_store.effective_settings().get("SEARCH_TOOL") or "tavily"
+        return {
+            "keyring_available": avail,
+            "llm_key_present": llm_key is not None,
+            "search_tool": search_tool,
+        }
+    except Exception:
+        return {"keyring_available": False, "llm_key_present": False, "search_tool": None}
+
+
+def _is_http_url(v: Any) -> bool:
+    if not isinstance(v, str) or not v.strip():
+        return False
+    try:
+        parts = urlparse(v.strip())
+    except Exception:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
+def _validate_settings_payload(payload: dict) -> list:
+    """PUT /settings validation; returns human-readable detail strings."""
+    details: list = []
+
+    def section(name: str) -> dict:
+        v = payload.get(name)
+        if v is None:
+            return {}
+        if not isinstance(v, dict):
+            details.append(f"{name} must be an object")
+            return {}
+        return v
+
+    llm = section("llm")
+    if "endpoint" in llm and not _is_http_url(llm["endpoint"]):
+        details.append("llm.endpoint must be an http(s) URL")
+    if "model" in llm and (not isinstance(llm["model"], str) or not llm["model"].strip()):
+        details.append("llm.model must be a non-empty string")
+    if "thinking" in llm and not isinstance(llm["thinking"], bool):
+        details.append("llm.thinking must be a boolean")
+
+    search = section("search")
+    if "tool" in search and search["tool"] not in ("tavily", "searxng"):
+        details.append("search.tool must be 'tavily' or 'searxng'")
+    if "searxng_url" in search and not _is_http_url(search["searxng_url"]):
+        details.append("search.searxng_url must be an http(s) URL")
+    if "throttle_ms" in search:
+        t = search["throttle_ms"]
+        if isinstance(t, bool) or not isinstance(t, int) or not 0 <= t <= 5000:
+            details.append("search.throttle_ms must be an integer between 0 and 5000")
+
+    emb = section("embeddings")
+    if "endpoint" in emb and not _is_http_url(emb["endpoint"]):
+        details.append("embeddings.endpoint must be an http(s) URL")
+    if "model" in emb and (not isinstance(emb["model"], str) or not emb["model"].strip()):
+        details.append("embeddings.model must be a non-empty string")
+
+    keys = payload.get("keys")
+    if keys is not None and not isinstance(keys, dict):
+        details.append("keys must be an object")
+        keys = {}
+    for name, value in (keys or {}).items():
+        if name not in ("llm", "tavily", "embedding"):
+            details.append(f"keys: unknown key {name!r} (expected llm / tavily / embedding)")
+        elif not isinstance(value, str):
+            details.append(f"keys.{name} must be a string (empty string deletes)")
+
+    if not any(payload.get(k) for k in ("llm", "search", "embeddings", "keys")):
+        details.append("nothing to update — provide llm, search, embeddings and/or keys")
+    return details
+
+
+def _pick(form: dict, form_key: str, eff: dict, eff_key: str) -> Optional[str]:
+    """Form value wins (empty string = force absent), else the saved
+    effective value."""
+    if form_key in form:
+        v = form[form_key]
+        return None if v in (None, "") else str(v)
+    return eff.get(eff_key)
+
+
+def _test_llm(form: dict, eff: dict) -> dict:
+    endpoint = _pick(form, "endpoint", eff, "LLM_ENDPOINT")
+    model = _pick(form, "model", eff, "LLM_MODEL")
+    key = _pick(form, "key", eff, "LLM_API_KEY")
+    if not endpoint or not model:
+        return {"ok": False, "error": "llm.endpoint and llm.model must be saved first"}
+    if not key:
+        return {
+            "ok": False,
+            "error": "LLM_API_KEY not set — store it in the OS keyring or set the environment variable",
+        }
+    started = time.monotonic()
+
+    def done(ok: bool, **extra) -> dict:
+        out = {"ok": ok, "latency_ms": int((time.monotonic() - started) * 1000)}
+        out.update(extra)
+        return out
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(base_url=endpoint.rstrip("/"), api_key=key, timeout=30.0, max_retries=0)
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "Reply with the single word: pong"}],
+                max_tokens=16,
+            )
+            snippet = (getattr(resp.choices[0].message, "content", None) or "")[:80]
+            return done(True, snippet=snippet)
+        except Exception as e:
+            if getattr(e, "status_code", None) not in (404, 405):
+                return done(False, error=f"{type(e).__name__}: {e}")
+            # Responses-API-only server (like the local MLX box): retry there.
+            resp = client.responses.create(
+                model=model, input="Reply with the single word: pong", max_output_tokens=16
+            )
+            snippet = (getattr(resp, "output_text", None) or "")[:80]
+            return done(True, snippet=snippet)
+        finally:
+            client.close()
+    except Exception as e:
+        return done(False, error=f"{type(e).__name__}: {e}")
+
+
+def _test_search(form: dict, eff: dict) -> dict:
+    import utils.search as search_mod
+
+    tool = str(_pick(form, "tool", eff, "SEARCH_TOOL") or "tavily").strip().lower()
+    started = time.monotonic()
+
+    def done(ok: bool, **extra) -> dict:
+        out = {"ok": ok, "latency_ms": int((time.monotonic() - started) * 1000)}
+        out.update(extra)
+        return out
+
+    try:
+        if tool == "searxng":
+            base = (str(_pick(form, "searxng_url", eff, "SEARXNG_URL") or "http://localhost:8081")).rstrip("/")
+            import requests
+
+            try:
+                health = requests.get(f"{base}/healthz", timeout=5)
+            except Exception as e:
+                return done(False, error=f"searxng: {base} unreachable ({type(e).__name__})")
+            if health.status_code != 200:
+                return done(False, error=f"searxng: {base}/healthz returned HTTP {health.status_code}")
+            search_mod.pace_next_query()  # honor the configured throttle
+            out = search_mod.SearxngSearchTool(base_url=base).search("deep learning", 5)
+            return done(True, result_count=len(out.get("results", [])))
+        key = _pick(form, "key", eff, "TAVILY_API_KEY")
+        if not key:
+            return {
+                "ok": False,
+                "error": "TAVILY_API_KEY not set — store it in the OS keyring or set the environment variable",
+            }
+        search_mod.pace_next_query()
+        from tavily import TavilyClient
+
+        res = TavilyClient(api_key=key).search(query="deep learning", max_results=5, search_depth="basic")
+        return done(True, result_count=len(res.get("results", [])))
+    except Exception as e:
+        return done(False, error=f"{type(e).__name__}: {e}")
+
+
+def _test_embedding(form: dict, eff: dict) -> dict:
+    endpoint = _pick(form, "endpoint", eff, "EMBEDDING_ENDPOINT")
+    model = _pick(form, "model", eff, "EMBEDDING_MODEL")
+    key = _pick(form, "key", eff, "EMBEDDING_API_KEY")
+    if not endpoint or not model:
+        return {"ok": False, "error": "embeddings.endpoint and embeddings.model must be saved first"}
+    if not key:
+        return {
+            "ok": False,
+            "error": "EMBEDDING_API_KEY not set — store it in the OS keyring or set the environment variable",
+        }
+    started = time.monotonic()
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(base_url=endpoint.rstrip("/"), api_key=key, timeout=30.0, max_retries=0)
+        try:
+            r = client.embeddings.create(model=model, input="hello")
+            return {
+                "ok": True,
+                "latency_ms": int((time.monotonic() - started) * 1000),
+                "dim": len(r.data[0].embedding),
+            }
+        finally:
+            client.close()
+    except Exception as e:
+        return {
+            "ok": False,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
 
 
 def main() -> None:

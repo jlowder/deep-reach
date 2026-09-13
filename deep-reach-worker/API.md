@@ -40,6 +40,9 @@ curl -s localhost:8321/health
 | POST | `/documents` | Stage PDF files for the next research task → 201 {documents, rejected} (400 if all rejected) |
 | GET | `/documents` | {staged, on_disk, indexed} |
 | DELETE | `/documents` | Remove all staged documents → 200 {removed} |
+| GET | `/settings` | Dialog state — secrets as presence+source, never key values |
+| PUT | `/settings` | Save settings; hot-applies to the next run (embeddings need a restart) |
+| POST | `/settings/test` | One-shot live check of the llm / search / embedding configuration |
 
 ### POST /research
 
@@ -191,10 +194,66 @@ pump — the queue advances only when the zombie truly stops.
 ### GET /health
 
 ```json
-{"service": "multi-agent-rag-researcher", "running": false, "pending": 0, "deep_configured": true}
+{"service": "multi-agent-rag-researcher", "running": false, "pending": 0, "deep_configured": true,
+ "settings": {"keyring_available": true, "llm_key_present": true, "search_tool": "searxng"}}
 ```
 
-`running` is true while any task is executing; `pending` is the count of queued (not yet started) tasks; `deep_configured` is true when the config has both an endpoint and an API key.
+`running` is true while any task is executing; `pending` is the count of queued (not yet started) tasks; `deep_configured` is true when the config has both an endpoint and an API key; `settings` is the cheap dialog summary (keyring backend availability, LLM key presence, active search tool).
+
+## Settings (dialog backend)
+
+The web settings dialog talks to this service through the unified API glue. Non-secret settings live in `utils/var.env`; API keys live in the **OS keyring** under service `deep-reach` (entries `llm-api-key`, `tavily-api-key`, `embedding-api-key`) with the environment variable as fallback. There is no plaintext-file fallback: a key that is neither in the keyring nor the environment is simply *unresolved*, and any run/test that needs it fails fast naming the exact variable.
+
+**Secret resolution chain:** OS keyring → environment variable (incl. `var.env` values) → refuse. At worker startup the service idempotently migrates live plaintext keys still sitting in `var.env` into the keyring and blanks those lines (with no keyring backend the file is left alone — the env path keeps working).
+
+**Hot-apply:** saved non-embedding settings apply to the **next** run without a restart (the config singleton is invalidated; OpenAI clients re-cache per endpoint:key). Embedding configuration is frozen at import in the vector store, so any change to `EMBEDDING_*` is reported via `requires_restart` and needs a worker restart.
+
+### GET /settings
+
+```json
+{
+  "llm": {"endpoint": "http://localhost:8080/v1", "model": "Ornith-1.5-35B-A3B-MLX-8bit",
+          "thinking": true, "key": {"present": true, "source": "keyring"}},
+  "search": {"tool": "searxng", "searxng_url": "http://localhost:8081", "throttle_ms": 1000,
+             "tavily_key": {"present": false, "source": null}},
+  "embeddings": {"endpoint": "http://localhost:8080/v1", "model": "nomicai-modernbert-embed-base-bf16",
+                 "key": {"present": true, "source": "keyring"}},
+  "keyring": {"available": true, "backend": "macOS Keyring"},
+  "requires_restart": []
+}
+```
+
+`source` is `"keyring"`, `"env"`, or `null` (unresolved). Key VALUES are never included. `requires_restart` lists `"embeddings"` when the effective embedding config differs from the running (import-frozen) one.
+
+### PUT /settings
+
+```json
+{
+  "llm": {"endpoint": "http://localhost:8080/v1", "model": "Some-Other-Model", "thinking": false},
+  "search": {"tool": "searxng", "searxng_url": "http://localhost:8081", "throttle_ms": 1000},
+  "embeddings": {"endpoint": "http://localhost:8080/v1", "model": "nomicai-modernbert-embed-base-bf16"},
+  "keys": {"llm": "new-or-empty-string", "tavily": "", "embedding": "keep-current"}
+}
+```
+
+Rules: any field/section absent = keep current; a key `""` = **delete** the key (keyring + var.env line); validation — `tool` ∈ {tavily, searxng}, `throttle_ms` int 0..5000, endpoints must be http(s) URLs, models non-empty, `thinking` boolean. A key that must be stored with no keyring backend available → 503 naming the environment variable. 200 response = the GET shape + `{"applied": true, "errors": []}`; `requires_restart` reflects the post-save state (embeddings changes surface here).
+
+### POST /settings/test
+
+```json
+{"target": "llm", "llm": {"endpoint": "http://localhost:8080/v1", "model": "...", "key": "optional-override"}}
+```
+
+`target` is `llm` | `search` | `embedding`; the `llm` / `search` / `embedding` form object (when present) overrides the saved values field-for-field — the dialog uses this to validate before saving. One minimal live call per target (16-token completion / one query through the resolved search tool / one embedding, 30 s timeout each; the search test paces itself per `SEARCH_THROTTLE_MS`):
+
+```json
+{"ok": true, "latency_ms": 412, "snippet": "pong"}          // llm
+{"ok": true, "latency_ms": 87, "result_count": 5}           // search
+{"ok": true, "latency_ms": 63, "dim": 768}                  // embedding
+{"ok": false, "error": "LLM_API_KEY not set — store it in the OS keyring or set the environment variable"}
+```
+
+Business failures (missing key, unreachable endpoint, throttled engine) return 200 with `ok: false`; malformed bodies return 400.
 
 ## Step tracking
 

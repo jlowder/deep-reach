@@ -159,3 +159,76 @@ export interface Health {
   worker: UpstreamStatus;
   paperbot: UpstreamStatus;
 }
+
+// --- settings dialog (worker /settings via the glue) -----------------------
+
+/** A key's storage state. The API never returns key VALUES — only where a
+ *  live key currently resolves: keyring -> env -> null (unresolved). */
+export interface SettingsKeyState {
+  present: boolean;
+  source: "keyring" | "env" | null;
+}
+
+export type SearchTool = "tavily" | "searxng";
+
+/** GET /settings (the dialog's loaded state). */
+export interface Settings {
+  llm: {
+    endpoint: string;
+    model: string;
+    thinking: boolean;
+    key: SettingsKeyState;
+  };
+  search: {
+    tool: SearchTool;
+    searxng_url: string | null;
+    throttle_ms: number;
+    tavily_key: SettingsKeyState;
+  };
+  embeddings: {
+    endpoint: string;
+    model: string;
+    key: SettingsKeyState;
+  };
+  keyring: {
+    available: boolean;
+    backend: string | null;
+  };
+  /** Import-frozen subsystems whose saved config differs from the running
+   *  process (currently: "embeddings") — changes need a worker restart. */
+  requires_restart: string[];
+}
+
+/** PUT /settings body: every field optional (absent = keep); a key string
+ *  SETS the key, "" DELETES it, absent KEEPS it. */
+export interface SaveSettingsPayload {
+  llm?: { endpoint?: string; model?: string; thinking?: boolean };
+  search?: { tool?: SearchTool; searxng_url?: string; throttle_ms?: number };
+  embeddings?: { endpoint?: string; model?: string };
+  keys?: { llm?: string; tavily?: string; embedding?: string };
+}
+
+/** PUT /settings response: the GET shape plus the save outcome. */
+export interface SaveSettingsResult extends Settings {
+  applied: boolean;
+  errors: string[];
+}
+
+/** POST /settings/test body: the target plus optional current-form values
+ *  (including an entered key) that override the saved settings. */
+export interface TestSettingPayload {
+  target: "llm" | "search" | "embedding";
+  llm?: { endpoint?: string; model?: string; thinking?: boolean; key?: string };
+  search?: { tool?: SearchTool; searxng_url?: string; throttle_ms?: number; key?: string };
+  embedding?: { endpoint?: string; model?: string; key?: string };
+}
+
+/** POST /settings/test response: ok + a per-target proof, or verbatim error. */
+export interface TestSettingResult {
+  ok: boolean;
+  latency_ms?: number;
+  snippet?: string;
+  result_count?: number;
+  dim?: number;
+  error?: string;
+}

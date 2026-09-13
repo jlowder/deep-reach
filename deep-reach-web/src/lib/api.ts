@@ -8,11 +8,18 @@ import type {
   DeleteResult,
   Documents,
   Health,
+  SaveSettingsPayload,
+  SaveSettingsResult,
+  SearchTool,
+  Settings,
+  SettingsKeyState,
   Task,
   TaskLinks,
   TaskStats,
   TaskStep,
   TaskSummary,
+  TestSettingPayload,
+  TestSettingResult,
   UploadResult,
 } from "./types";
 
@@ -149,6 +156,58 @@ export function normalizeSummary(raw: unknown): TaskSummary {
   };
 }
 
+/** Render-safe GET /settings (the dialog must not crash on schema drift). */
+export function normalizeSettings(raw: unknown): Settings {
+  const r = isRecord(raw) ? raw : {};
+  const key = (v: unknown): SettingsKeyState => {
+    const k = isRecord(v) ? v : {};
+    const source = k.source;
+    return {
+      present: typeof k.present === "boolean" ? k.present : false,
+      source: source === "keyring" || source === "env" ? source : null,
+    };
+  };
+  const llm = isRecord(r.llm) ? r.llm : {};
+  const search = isRecord(r.search) ? r.search : {};
+  const emb = isRecord(r.embeddings) ? r.embeddings : {};
+  const kr = isRecord(r.keyring) ? r.keyring : {};
+  const tool = str(search.tool);
+  return {
+    llm: {
+      endpoint: str(llm.endpoint),
+      model: str(llm.model),
+      thinking: typeof llm.thinking === "boolean" ? llm.thinking : false,
+      key: key(llm.key),
+    },
+    search: {
+      tool: tool === "tavily" || tool === "searxng" ? (tool as SearchTool) : "searxng",
+      searxng_url: typeof search.searxng_url === "string" && search.searxng_url ? search.searxng_url : null,
+      throttle_ms: num(search.throttle_ms),
+      tavily_key: key(search.tavily_key),
+    },
+    embeddings: {
+      endpoint: str(emb.endpoint),
+      model: str(emb.model),
+      key: key(emb.key),
+    },
+    keyring: {
+      available: typeof kr.available === "boolean" ? kr.available : false,
+      backend: typeof kr.backend === "string" && kr.backend ? kr.backend : null,
+    },
+    requires_restart: strArray(r.requires_restart),
+  };
+}
+
+/** Render-safe PUT /settings response. */
+export function normalizeSaveResult(raw: unknown): SaveSettingsResult {
+  const r = isRecord(raw) ? raw : {};
+  return {
+    ...normalizeSettings(r),
+    applied: typeof r.applied === "boolean" ? r.applied : false,
+    errors: strArray(r.errors),
+  };
+}
+
 export const api = {
   health(): Promise<Health> {
     return request<Health>("/api/health");
@@ -200,5 +259,29 @@ export const api = {
    */
   downloadUrl(id: string, format: "pdf" | "html"): string {
     return `/api/research/${encodeURIComponent(id)}/download?format=${format}`;
+  },
+
+  // --- settings dialog -----------------------------------------------------
+
+  getSettings(): Promise<Settings> {
+    return request<unknown>("/api/settings").then(normalizeSettings);
+  },
+
+  saveSettings(payload: SaveSettingsPayload): Promise<SaveSettingsResult> {
+    return request<unknown>("/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    }).then(normalizeSaveResult);
+  },
+
+  /** One-shot live check; the worker returns ok:false + verbatim error text
+   *  for business failures (those arrive as 200), ApiError for the rest. */
+  testSetting(payload: TestSettingPayload): Promise<TestSettingResult> {
+    return request<TestSettingResult>("/api/settings/test", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    });
   },
 };

@@ -131,7 +131,7 @@ A global budget caps a run at 40 LLM calls. If the budget runs out or an individ
 ├── ui/                           # Gradio app and UI handlers
 ├── utils/
 │   ├── requirements.txt          # Python dependencies
-│   ├── var.env                   # Local API keys (gitignored; seeded from .env.example)
+│   ├── var.env                   # Non-secret settings (gitignored; API keys live in the OS keyring since the settings dialog)
 │   ├── memory.db                 # Created at runtime
 │   └── qdrant_storage/           # Created at runtime
 ├── worker_agents/                # Retriever, writer, verifier, and decomposer

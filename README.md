@@ -29,4 +29,4 @@ PIDs live in `logs/<service>.pid`, output in `logs/<service>.log`. Services that
 
 ## External LLM dependency
 
-The worker calls an external OpenAI-compatible LLM at `LLM_ENDPOINT` in `deep-reach-worker/utils/var.env` (default `http://localhost:8080`). Run that LLM server separately — if it is unreachable, the worker stays up but research requests will fail. `./run.sh start` prints a (non-fatal) warning when the endpoint is down.
+The worker calls an external OpenAI-compatible LLM at `LLM_ENDPOINT` in `deep-reach-worker/utils/var.env` (default `http://localhost:8080`). Run that LLM server separately — if it is unreachable, the worker stays up but research requests will fail. `./run.sh start` prints a (non-fatal) warning when the endpoint is down. API keys now live in the OS keychain (service `deep-reach`) — `var.env` keeps only non-secret settings, and a worker restart migrates any plaintext keys still in it into the keyring.
