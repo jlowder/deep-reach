@@ -10,7 +10,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api } from "./api";
-import type { Task, TaskSummary } from "./types";
+import type { QueueState, Task, TaskSummary } from "./types";
 
 function message(err: unknown): string {
   return err instanceof ApiError ? err.message : String(err);
@@ -18,15 +18,17 @@ function message(err: unknown): string {
 
 export function useTasks(intervalMs = 2000) {
   const [tasks, setTasks] = useState<TaskSummary[] | null>(null);
+  const [queue, setQueueState] = useState<QueueState>({ paused: false, pending: 0 });
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<number | null>(null);
   const alive = useRef(true);
 
   const refresh = useCallback(async () => {
     try {
-      const { tasks: next } = await api.listTasks();
+      const { tasks: next, queue: q } = await api.listTasks();
       if (!alive.current) return;
       setTasks(next);
+      setQueueState(q);
       setError(null);
       setLastUpdate(Date.now());
     } catch (err) {
@@ -79,7 +81,7 @@ export function useTasks(intervalMs = 2000) {
     [refresh],
   );
 
-  return { tasks, error, lastUpdate, refresh, removeTask };
+  return { tasks, queue, error, lastUpdate, refresh, removeTask };
 }
 
 /** Detail fetch + fast poll for live tasks. `active` = pending/running. */

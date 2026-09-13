@@ -8,6 +8,7 @@ import type {
   DeleteResult,
   Documents,
   Health,
+  QueueState,
   SaveSettingsPayload,
   SaveSettingsResult,
   SearchTool,
@@ -156,6 +157,15 @@ export function normalizeSummary(raw: unknown): TaskSummary {
   };
 }
 
+/** Render-safe queue state (missing field or shape drift -> safe default). */
+export function normalizeQueue(raw: unknown): QueueState {
+  const q = isRecord(raw) ? raw : {};
+  return {
+    paused: q.paused === true,
+    pending: Math.max(0, num(q.pending)),
+  };
+}
+
 /** Render-safe GET /settings (the dialog must not crash on schema drift). */
 export function normalizeSettings(raw: unknown): Settings {
   const r = isRecord(raw) ? raw : {};
@@ -213,9 +223,10 @@ export const api = {
     return request<Health>("/api/health");
   },
 
-  listTasks(): Promise<{ tasks: TaskSummary[] }> {
-    return request<{ tasks: unknown } | null>("/api/research").then((d) => ({
+  listTasks(): Promise<{ tasks: TaskSummary[]; queue: QueueState }> {
+    return request<{ tasks: unknown; queue?: unknown } | null>("/api/research").then((d) => ({
       tasks: isRecord(d) && Array.isArray(d.tasks) ? (d.tasks as unknown[]).map(normalizeSummary) : [],
+      queue: normalizeQueue(isRecord(d) ? d.queue : null),
     }));
   },
 
@@ -259,6 +270,18 @@ export const api = {
    */
   downloadUrl(id: string, format: "pdf" | "html"): string {
     return `/api/research/${encodeURIComponent(id)}/download?format=${format}`;
+  },
+
+  // --- queue pause ----------------------------------------------------------
+
+  /** PUT /queue {paused}; the worker 400s (ApiError) on bad input. Returns
+   *  the worker's authoritative {paused, pending, running->pending}. */
+  setQueue(paused: boolean): Promise<QueueState> {
+    return request<unknown>("/api/queue", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ paused }),
+    }).then(normalizeQueue);
   },
 
   // --- settings dialog -----------------------------------------------------
