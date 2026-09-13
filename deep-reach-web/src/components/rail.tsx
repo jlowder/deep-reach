@@ -8,6 +8,7 @@
 import { useRef, useState } from "react";
 import { ApiError, api } from "@/lib/api";
 import { cx } from "@/lib/cx";
+import type { QueueState } from "@/lib/types";
 import { ThemeToggle } from "@/lib/theme";
 import { SettingsButton } from "@/components/settings-dialog";
 import type { RefObject } from "react";
@@ -22,8 +23,13 @@ interface Chip {
 }
 
 interface RailProps {
-  pendingCount: number;
-  runningCount: number;
+  /** Authoritative queue state from the 2s poll (useTasks). */
+  queue: QueueState;
+  /** useTasks lastUpdate — a poll completed at/after an optimistic flip is
+   *  the authority to snap the display back to. */
+  queueSyncedAt: number | null;
+  /** true while the poll is showing an error (don't snap onto a stale poll). */
+  queueSyncFailed: boolean;
   /** called with the new task id after a successful create */
   onCreated: (id: string) => void;
   onOpenSettings: () => void;
@@ -33,7 +39,7 @@ interface RailProps {
 
 let chipSeq = 0;
 
-export function Rail({ pendingCount, runningCount, onCreated, onOpenSettings, settingsTriggerRef }: RailProps) {
+export function Rail({ queue, queueSyncedAt, queueSyncFailed, onCreated, onOpenSettings, settingsTriggerRef }: RailProps) {
   const [open, setOpen] = useState(false); // mobile collapse (below 960px)
   const fileRef = useRef<HTMLInputElement>(null);
   const [topic, setTopic] = useState("");
@@ -279,21 +285,125 @@ export function Rail({ pendingCount, runningCount, onCreated, onOpenSettings, se
                 {createError}
               </p>
             )}
-            {runningCount > 0 && pendingCount > 0 && !creating && (
-              <p className="text-center font-mono text-[11px] text-dim">
-                queue: {pendingCount} ahead
-              </p>
-            )}
           </form>
         </div>
 
         <div className="mt-auto border-t border-hairline pt-6">
           <div className="flex items-center gap-3">
+            <QueueToggle paused={queue.paused} pending={queue.pending} syncedAt={queueSyncedAt} syncFailed={queueSyncFailed} />
             <ThemeToggle className="flex-1" />
             <SettingsButton onClick={onOpenSettings} buttonRef={settingsTriggerRef} />
           </div>
         </div>
       </div>
     </aside>
+  );
+}
+
+/**
+ * Queue pause control (in-memory on the worker; resets on its restart;
+ * running runs are unaffected). Optimistic: the click flips the display
+ * immediately and PUTs; the result is kept until the first poll that
+ * completes after the click settles it (matching → silently absorb;
+ * disagreeing, e.g. a worker restart in between → snap to the poll).
+ * Not destructive — no arming; a failed PUT reverts + shows the worker's
+ * verbatim error inline.
+ */
+function QueueToggle({
+  paused,
+  pending,
+  syncedAt,
+  syncFailed,
+}: {
+  paused: boolean;
+  pending: number;
+  syncedAt: number | null;
+  syncFailed: boolean;
+}) {
+  const [optimistic, setOptimistic] = useState<{ paused: boolean; at: number } | null>(null);
+  const [inFlight, setInFlight] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Reconcile in the render phase (the documented derived-state pattern —
+  // no effect, no paint of the stale value): once a non-error poll has
+  // completed at/after the click, the poll is the truth again.
+  if (optimistic !== null && syncedAt !== null && syncedAt >= optimistic.at && !syncFailed) {
+    setOptimistic(null);
+  }
+
+  const shown = optimistic !== null ? optimistic.paused : paused;
+
+  const toggle = () => {
+    if (inFlight) return;
+    const next = !shown;
+    setOptimistic({ paused: next, at: Date.now() });
+    setInFlight(true);
+    setError(null);
+    api
+      .setQueue(next)
+      .then(() => {
+        // Keep the optimistic value; the post-click poll confirms and
+        // clears it (absorbed silently above).
+        setInFlight(false);
+      })
+      .catch((err: unknown) => {
+        setOptimistic(null); // revert
+        setInFlight(false);
+        setError(err instanceof ApiError ? err.message : String(err));
+      });
+  };
+
+  return (
+    <div className="flex flex-col justify-center gap-1.5">
+      <button
+        type="button"
+        onClick={toggle}
+        disabled={inFlight}
+        aria-pressed={shown}
+        aria-label={
+          shown
+            ? `Queue paused${pending > 0 ? `, ${pending} waiting` : ""} — resume queue`
+            : "Queue active — pause queue"
+        }
+        title={shown ? "Resume queue" : "Pause queue"}
+        className="-mx-1 flex items-center gap-2 rounded-none px-1 py-1 text-dim hover:text-text focus-visible:ring-1 focus-visible:ring-accent disabled:opacity-50"
+      >
+        <span
+          aria-hidden
+          className={
+            shown
+              ? "h-1.5 w-1.5 rounded-full bg-accent shadow-[0_0_8px_var(--glow)]"
+              : "h-1.5 w-1.5 rounded-full bg-dim"
+          }
+        />
+        {shown ? <PlayIcon className="h-3.5 w-3.5" /> : <PauseIcon className="h-3.5 w-3.5" />}
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em]">queue</span>
+        <span className={cx("font-mono text-[10px]", shown ? "text-wait" : "text-dim/70")}>
+          {shown ? (pending > 0 ? `paused · ${pending}` : "paused") : "active"}
+        </span>
+      </button>
+      {error && (
+        <p role="alert" className="max-w-56 font-mono text-[11px] leading-snug text-err">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function PauseIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden fill="currentColor" stroke="none">
+      <rect x="6.5" y="5" width="3.5" height="14" />
+      <rect x="14" y="5" width="3.5" height="14" />
+    </svg>
+  );
+}
+
+function PlayIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden fill="currentColor" stroke="none">
+      <path d="M8 5.5v13l11-6.5z" />
+    </svg>
   );
 }
