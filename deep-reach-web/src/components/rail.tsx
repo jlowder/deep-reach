@@ -366,7 +366,7 @@ function QueueToggle({
             : "Queue active — pause queue"
         }
         title={shown ? "Resume queue" : "Pause queue"}
-        className="-mx-1 flex items-center gap-2 rounded-none px-1 py-1 text-dim hover:text-text focus-visible:ring-1 focus-visible:ring-accent disabled:opacity-50"
+        className="-mx-1 flex shrink-0 items-center gap-2 rounded-none px-1 py-1 text-dim hover:text-text focus-visible:ring-1 focus-visible:ring-accent disabled:opacity-50"
       >
         <span
           aria-hidden
@@ -377,8 +377,8 @@ function QueueToggle({
           }
         />
         {shown ? <PlayIcon className="h-3.5 w-3.5" /> : <PauseIcon className="h-3.5 w-3.5" />}
-        <span className="font-mono text-[10px] uppercase tracking-[0.14em]">queue</span>
-        <span className={cx("font-mono text-[10px]", shown ? "text-wait" : "text-dim/70")}>
+        <span className="whitespace-nowrap font-mono text-[10px] uppercase tracking-[0.14em]">queue</span>
+        <span className={cx("whitespace-nowrap font-mono text-[10px]", shown ? "text-wait" : "text-dim/70")}>
           {shown ? (pending > 0 ? `paused · ${pending}` : "paused") : "active"}
         </span>
       </button>
