@@ -229,37 +229,39 @@ function KeyField(props: {
           </span>
         )}
       </div>
-      <div className="relative flex items-center gap-2">
-        <input
-          id={props.id}
-          type={show ? "text" : "password"}
-          value={props.value}
-          onChange={(e) => props.onChange(e.target.value)}
-          placeholder={placeholder}
-          autoComplete="off"
-          spellCheck={false}
-          className="w-full rounded-none border border-hairline bg-field px-3 py-2 pr-9 font-mono text-[12px] placeholder:text-dim/60"
-        />
-        <button
-          type="button"
-          onClick={() => setShow((v) => !v)}
-          aria-label={show ? "Hide key" : "Show key"}
-          className="absolute right-2 text-dim hover:text-text"
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-4 w-4" aria-hidden>
-            {show ? (
-              <>
-                <path d="M3 3l18 18" />
-                <path d="M10.6 5.1A9.8 9.8 0 0 1 12 5c6.5 0 10 7 10 7a17.4 17.4 0 0 1-2.2 3M6.2 6.2C3.2 8.1 2 12 2 12s3.5 7 10 7c1.3 0 2.5-.2 3.6-.6" />
-              </>
-            ) : (
-              <>
-                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
-                <circle cx="12" cy="12" r="3" />
-              </>
-            )}
-          </svg>
-        </button>
+      <div className="flex items-center gap-2">
+        <div className="relative flex-1">
+          <input
+            id={props.id}
+            type={show ? "text" : "password"}
+            value={props.value}
+            onChange={(e) => props.onChange(e.target.value)}
+            placeholder={placeholder}
+            autoComplete="off"
+            spellCheck={false}
+            className="w-full rounded-none border border-hairline bg-field px-3 py-2 pr-9 font-mono text-[12px] placeholder:text-dim/60"
+          />
+          <button
+            type="button"
+            onClick={() => setShow((v) => !v)}
+            aria-label={show ? "Hide key" : "Show key"}
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-dim hover:text-text"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="h-4 w-4" aria-hidden>
+              {show ? (
+                <>
+                  <path d="M3 3l18 18" />
+                  <path d="M10.6 5.1A9.8 9.8 0 0 1 12 5c6.5 0 10 7 10 7a17.4 17.4 0 0 1-2.2 3M6.2 6.2C3.2 8.1 2 12 2 12s3.5 7 10 7c1.3 0 2.5-.2 3.6-.6" />
+                </>
+              ) : (
+                <>
+                  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+                  <circle cx="12" cy="12" r="3" />
+                </>
+              )}
+            </svg>
+          </button>
+        </div>
         {state.present && (
           <button
             type="button"
