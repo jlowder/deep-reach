@@ -38,6 +38,13 @@ _CACHE_TMP_DIRS: list = []
 
 
 @pytest.fixture(autouse=True)
+def _llm_key_resolvable(pin_keyring):
+    # deep_research refuses to start when no LLM key resolves (keyring ->
+    # env); pin one so the suite is deterministic on keyring-less hosts.
+    pin_keyring(llm="test-llm-key")
+
+
+@pytest.fixture(autouse=True)
 def _cleanup_evidence_cache_tmp_dirs():
     for d in _CACHE_TMP_DIRS:
         shutil.rmtree(d, ignore_errors=True)

@@ -11,8 +11,17 @@ import importlib
 import threading
 import time
 
+import pytest
+
 import deep_research_orchestrator as dpo
 from test_deep_pipeline import _basic_env, _install_stubs, _run
+
+
+@pytest.fixture(autouse=True)
+def _llm_key_resolvable(pin_keyring):
+    # deep_research refuses to start when no LLM key resolves (keyring ->
+    # env); pin one so the suite is deterministic on keyring-less hosts.
+    pin_keyring(llm="test-llm-key")
 
 
 # ---------------------------------------------------------------------------

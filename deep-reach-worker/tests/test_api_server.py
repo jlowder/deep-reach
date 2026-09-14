@@ -19,6 +19,15 @@ import api_server
 import test_deep_pipeline as tdp
 
 
+@pytest.fixture(autouse=True)
+def _llm_key_resolvable(pin_keyring):
+    # The integration test runs the REAL deep_research (default run_fn),
+    # which refuses to start when no LLM key resolves (keyring -> env);
+    # pin one so the suite is deterministic on keyring-less hosts. The
+    # fake-run_fn unit tests never read the key.
+    pin_keyring(llm="test-llm-key")
+
+
 # ---------------------------------------------------------------------------
 # Fakes + helpers
 # ---------------------------------------------------------------------------

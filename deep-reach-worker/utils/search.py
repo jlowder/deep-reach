@@ -7,7 +7,9 @@ The backend is selected at call time via the environment:
                                  to tavily with a logged warning)
   SEARXNG_URL=http://localhost:8081   (SearXNG base URL, no trailing slash
                                  normalization needed — handled here)
-  TAVILY_API_KEY=...            (required only when SEARCH_TOOL=tavily)
+  TAVILY_API_KEY=...            (required only when SEARCH_TOOL=tavily;
+                                 resolved through the settings chain: OS
+                                 keyring -> environment, see utils.settings)
 
 All backends implement the same return contract and NEVER raise — on any
 error (missing key, network failure, non-200, malformed JSON) they return
@@ -30,6 +32,7 @@ import requests
 # Import utils.config first: its module-level code loads var.env via
 # load_dotenv, so env reads below see the real configuration.
 import utils.config  # noqa: F401
+from utils.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +116,10 @@ class TavilySearchTool(SearchTool):
         """Build the TavilyClient on first use; None when no API key is set."""
         if not self._client_built:
             self._client_built = True
-            api_key = os.getenv("TAVILY_API_KEY")
+            # Managed secret via the settings chain (keyring -> env -> None)
+            # so the search tool and the settings dialog agree; the var.env
+            # line is blanked by the startup migration.
+            api_key = get_config().tavily_api_key
             if not api_key:
                 _warn_once(
                     "tavily:no-key",

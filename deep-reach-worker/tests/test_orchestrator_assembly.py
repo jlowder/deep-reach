@@ -32,6 +32,13 @@ from models.report_schema import (
     Span,
 )
 
+
+@pytest.fixture(autouse=True)
+def _llm_key_resolvable(pin_keyring):
+    # deep_research refuses to start when no LLM key resolves (keyring ->
+    # env); pin one so the suite is deterministic on keyring-less hosts.
+    pin_keyring(llm="test-llm-key")
+
 # importlib (not `import ... as`): worker_agents/__init__.py re-exports the
 # writer_agent function, shadowing the module name in the package namespace.
 dmod = importlib.import_module("worker_agents.decomposition_agent")

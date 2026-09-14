@@ -29,6 +29,14 @@ from test_deep_pipeline import _FakeResponse
 
 import deep_research_orchestrator as dpo
 
+
+@pytest.fixture(autouse=True)
+def _llm_key_resolvable(pin_keyring):
+    # deep_research refuses to start when no LLM key resolves (keyring ->
+    # env); pin one so the suite is deterministic on keyring-less hosts.
+    pin_keyring(llm="test-llm-key")
+
+
 EMPTY_PLAN = {"is_simple": False, "sub_questions": []}
 
 

@@ -27,6 +27,13 @@ from worker_agents.retriever_agent import ResearchEvidencePack
 
 
 @pytest.fixture(autouse=True)
+def _llm_key_resolvable(pin_keyring):
+    # deep_research refuses to start when no LLM key resolves (keyring ->
+    # env); pin one so the suite is deterministic on keyring-less hosts.
+    pin_keyring(llm="test-llm-key")
+
+
+@pytest.fixture(autouse=True)
 def _cleanup_evidence_cache_tmp_dirs():
     # _install_stubs appends its temp DB dirs to test_deep_pipeline's
     # registry; that module's autouse fixture only covers its own tests.

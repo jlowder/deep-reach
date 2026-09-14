@@ -659,6 +659,22 @@ def deep_research(
         stats["sections"] = len(sections)
         return {"final_answer": final_answer, "state": state, "stats": stats}
 
+    # Fail fast when the LLM key is unresolvable. The managed key resolves
+    # through the settings chain (utils.settings.get_secret: keyring -> env
+    # -> None); with no resolvable key every pipeline call 401s, every
+    # section fails to draft, and the run would still "complete" as an
+    # empty report. Die here naming the exact variable instead of six
+    # doomed calls.
+    if api_key is None and not (get_config().default_api_key or "").strip():
+        msg = (
+            "LLM_API_KEY not set — store it in the OS keychain or set the "
+            "environment variable LLM_API_KEY"
+        )
+        logger.warning("[DEEP] refusing to start: %s", msg)
+        if verbose:
+            print(f"[DEEP] {msg}")
+        return _finish("", error=msg)
+
     # Serialize deep runs (the tracked run_model swap is process-global).
     # `originals` is pre-bound and the try covers the reset/install pair,
     # so the finally below releases the lock on every exit path; a wedged

@@ -109,6 +109,14 @@ class Config:
     default_endpoint: str
     default_api_key: str
     default_model: str
+
+    # Managed secrets that are not per-agent LLM keys, resolved through the
+    # same utils.settings.get_secret chain as default_api_key (keyring ->
+    # env -> None). Consumed by utils.search (Tavily) and
+    # qdrant_vector_database.vector_store (embeddings) so the pipeline and
+    # the settings dialog never disagree on which key is in effect.
+    tavily_api_key: Optional[str] = None
+    embedding_api_key: Optional[str] = None
     
     # Per-agent overrides
     retriever_endpoint: Optional[str] = None
@@ -240,11 +248,21 @@ def get_config() -> Config:
             )
             doc_score_threshold = 0.2
 
+        # Managed secrets through the settings chain (keyring -> env ->
+        # None): after the startup migration blanks the var.env key lines,
+        # the keyring is the source of truth and the environment is the
+        # documented fallback for keyring-less hosts.
+        llm_key, _ = _managed_secret("llm-api-key")
+        tavily_key, _ = _managed_secret("tavily-api-key")
+        embedding_key, _ = _managed_secret("embedding-api-key")
+
         _config = Config(
-            # Global defaults from environment
+            # Global defaults from environment (keys via the managed chain)
             default_endpoint=os.getenv("LLM_ENDPOINT", os.getenv("OPENAI_ENDPOINT", "https://api.openai.com/v1")),
-            default_api_key=os.getenv("LLM_API_KEY", os.getenv("OPENAI_API_KEY", "")),
+            default_api_key=llm_key or "",
             default_model=os.getenv("LLM_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.4")),
+            tavily_api_key=tavily_key,
+            embedding_api_key=embedding_key,
             
             # Retriever agent overrides
             retriever_endpoint=os.getenv("RETRIEVER_ENDPOINT"),
@@ -298,6 +316,26 @@ def get_config() -> Config:
         _validate_config(_config)
     
     return _config
+
+
+def _managed_secret(keyring_name: str):
+    """Resolve a managed secret (LLM/Tavily/embedding API key) through the
+    SAME chain as the settings layer (utils.settings.get_secret): OS
+    keyring -> environment -> (None, None).
+
+    Never the raw environment leg alone: the settings startup migration
+    BLANKS the var.env key lines, and the dotenv load at import turns a
+    blank line into an empty string — os.getenv() hands back "" (which
+    degrades to the client's "dummy" key and the LLM server rejects the
+    auth) even though the keyring holds the real key. The settings "Test"
+    endpoint and the pipeline must resolve the same key.
+
+    The deferred import breaks the utils.settings -> utils.config module
+    cycle (settings imports reset_config from this module).
+    """
+    from utils.settings import get_secret
+
+    return get_secret(keyring_name)
 
 
 def _validate_config(config: Config) -> None:

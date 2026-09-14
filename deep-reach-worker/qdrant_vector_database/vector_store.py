@@ -33,6 +33,19 @@ DEFAULT_DOCS_DIR = UTILS_DIR.parent / "docs"
 load_dotenv(ENV_FILE_PATH)
 
 
+def _managed_embedding_key() -> str:
+    """Embedding API key via the settings chain (keyring -> env -> ""): the
+    var.env line is blanked by the startup migration, so the keyring holds
+    the real value (an env var keeps working on keyring-less hosts).
+    Frozen at import — a change needs a worker restart (see
+    utils.settings._requires_restart). The deferred import keeps this module
+    independent of utils at import time."""
+    from utils.settings import get_secret
+
+    value, _ = get_secret("embedding-api-key")
+    return value or ""
+
+
 # get shared qdrant client for local vector storage
 @lru_cache(maxsize=1)
 def get_qdrant_client() -> QdrantClient:
@@ -174,11 +187,12 @@ OVERSAMPLE_FACTOR = 8
 MIN_FETCH_LIMIT = 20
 
 # Embedding model configuration from environment variables with type hints
+# (the API key via the settings chain — see below).
 EmbeddingConfig = dict[str, str]
 embedding_config: EmbeddingConfig = {
     "endpoint": os.getenv("EMBEDDING_ENDPOINT", ""),
     "model": os.getenv("EMBEDDING_MODEL", "nomicai-modernbert-embed-base-bf16"),
-    "api_key": os.getenv("EMBEDDING_API_KEY", ""),
+    "api_key": _managed_embedding_key(),
 }
 
 EMBEDDING_MODEL_NAME = embedding_config["model"]
