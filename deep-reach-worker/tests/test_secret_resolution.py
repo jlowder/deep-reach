@@ -18,6 +18,11 @@ fake keyring, tmp var.env, loopback stubs, no real network):
 - (b) no keyring entry + no env var -> the deep run refuses to start,
   naming the exact variable, and makes zero LLM calls (direct call and
   through the API layer: the record finalizes ``failed``).
+- (c) a run whose section drafts all fail (the writer raises like a 401)
+  assembles zero sections -> the run finalizes ``failed`` with the captured
+  last LLM error, never ``completed``; GET /report stays 409.
+- (d) zero sources with drafted sections -> still ``completed`` with the
+  UNSOURCED disclosure (existing behavior, unchanged).
 
 Run:  venv/bin/python -m pytest tests/test_secret_resolution.py -q
 """
@@ -26,6 +31,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import shutil
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,9 +43,12 @@ import api_server
 import deep_research_orchestrator as dpo
 import utils.config as config_mod
 import utils.settings as s
+import worker_agents.model_runner as model_runner
 # importlib (not `import ... as`): worker_agents/__init__.py re-exports the
 # agent functions, shadowing the submodule attributes.
 rmod = importlib.import_module("worker_agents.retriever_agent")
+wmod = importlib.import_module("worker_agents.writer_agent")
+import test_deep_pipeline as tdp
 from test_deep_pipeline import (
     CRITIC_OK_JSON,
     PLAN_JSON,
@@ -82,6 +91,17 @@ def iso(tmp_path, monkeypatch):
     config_mod.reset_config()
     yield
     config_mod.reset_config()
+
+
+@pytest.fixture(autouse=True)
+def _cache_tmp_cleanup():
+    # _install_stubs registers throwaway evidence-cache dirs in
+    # test_deep_pipeline's registry; that module's cleanup fixture only
+    # covers its own tests.
+    yield
+    for d in tdp._CACHE_TMP_DIRS:
+        shutil.rmtree(d, ignore_errors=True)
+    tdp._CACHE_TMP_DIRS.clear()
 
 
 def _canned_response(text: str) -> dict:
@@ -174,6 +194,17 @@ def _deep_run_fn(topic: str, **budgets) -> dict:
         on_stage=on_stage,
         on_section=on_section,
     )
+
+
+def _wait(client: TestClient, tid: str, timeout: float = 10.0) -> dict:
+    """Poll GET /research/{id} until the record is terminal."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        rec = client.get(f"/research/{tid}").json()
+        if rec["status"] not in ("pending", "running"):
+            return rec
+        time.sleep(0.05)
+    return rec
 
 
 def _cited_section() -> str:
@@ -284,13 +315,106 @@ class TestUnresolvableKeyFailsFast:
         )
         assert r.status_code == 202
         tid = r.json()["task_id"]
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            rec = client.get(f"/research/{tid}").json()
-            if rec["status"] not in ("pending", "running"):
-                break
-            time.sleep(0.05)
+        rec = _wait(client, tid)
         assert rec["status"] == "failed"
         assert "LLM_API_KEY" in rec["error"]
         assert rec["stats"]["llm_calls"] == 0
         assert client.get(f"/research/{tid}/report").status_code == 409
+
+
+class TestZeroSectionsFails:
+    def test_all_writers_failed_finalizes_failed_with_captured_error(
+        self, monkeypatch, pin_keyring
+    ):
+        """(c) the production failure mode: the key is resolvable so the run
+        starts, but every section draft 401s (writer raises) -> zero
+        sections assembled -> the run finalizes ``failed`` with the captured
+        last LLM error, never ``completed``; GET /report stays 409. Sources
+        exist, so the guard fires regardless of sourcing."""
+        pin_keyring(llm=KEYCHAIN_KEY)
+        tdp._install_stubs(monkeypatch, tdp._basic_env())
+
+        def raising_writer(*a, **k):
+            # Like a 401 from the LLM server: run_model raises and records
+            # the failure in its process-global capture.
+            model_runner.last_llm_error = (
+                'AuthenticationError: Error code: 401 - {"error": '
+                '{"message": "rejected api key", "type": "authentication_error"}}'
+            )
+            raise RuntimeError(
+                'Error code: 401 - {"error": {"message": "rejected api key"}}'
+            )
+
+        monkeypatch.setattr(wmod, "run_model", raising_writer)
+
+        client = TestClient(api_server.create_app(run_fn=_deep_run_fn))
+        tid = client.post(
+            "/research",
+            json={"topic": "t", "max_rounds": 1, "budget_doc": 0, "budget_web": 1},
+        ).json()["task_id"]
+        rec = _wait(client, tid)
+        assert rec["status"] == "failed", rec.get("error")
+        assert rec["error"].startswith("run produced no sections")
+        assert "rejected api key" in rec["error"]  # the captured real cause
+        assert "rejected api key" in rec["stats"]["last_llm_error"]
+        assert client.get(f"/research/{tid}/report").status_code == 409
+
+    def test_zero_sections_with_sources_via_direct_call(self, monkeypatch, pin_keyring):
+        """(c, direct) the same guard outside the API layer: the result dict
+        carries final_error, no report_json, and the captured error."""
+        pin_keyring(llm=KEYCHAIN_KEY)
+        tdp._install_stubs(monkeypatch, tdp._basic_env())
+
+        def failing_writer(*a, **k):
+            model_runner.last_llm_error = "RateLimitError: 429 too many requests"
+            raise RuntimeError("Error code: 429 - rate limited")
+
+        monkeypatch.setattr(wmod, "run_model", failing_writer)
+        result = dpo.deep_research(
+            "topic", verbose=False, max_rounds=1, budget_doc=0, budget_web=1
+        )
+        assert result["state"].get("report_json") is None
+        assert "no sections" in result["state"]["final_error"]
+        assert result["stats"]["sections"] == 0
+        assert result["stats"]["last_llm_error"] == "RateLimitError: 429 too many requests"
+
+
+class TestUnsourcedStillCompletes:
+    def test_zero_sources_with_sections_completes_unsourced(self, monkeypatch, pin_keyring):
+        """(d) the existing behavior, unchanged: drafted sections but zero
+        retrieved sources -> still ``completed`` + UNSOURCED disclosure (a
+        real report with no backing evidence), not failed."""
+        pin_keyring(llm=KEYCHAIN_KEY)
+        env = tdp._basic_env()
+        env["web_results"] = lambda query: []  # no web hits at all
+        tdp._install_stubs(monkeypatch, env)
+
+        stages: list[tuple[int, str]] = []
+        result = _deep_run_fn(
+            "t",
+            max_rounds=1,
+            budget_doc=0,
+            budget_web=1,
+            on_stage=lambda n, d: stages.append((n, d)),
+            on_section=lambda *a: None,
+        )
+        assert result["state"]["report_json"] is not None
+        report = json.loads(result["state"]["report_json"])
+        assert len(report["report"]["sections"]) == 2  # writers succeeded
+        assert len(report["report"]["sources"]) == 0
+        # the unsourced disclosure lands in the terminal assembly step
+        assert any("UNSOURCED" in d for _n, d in stages)
+        assert result["state"].get("final_error") is None
+
+        # API level: the same run finalizes completed (not failed) with a
+        # fetchable report whose quality reflects the missing sources.
+        client = TestClient(api_server.create_app(run_fn=_deep_run_fn))
+        tid = client.post(
+            "/research",
+            json={"topic": "t", "max_rounds": 1, "budget_doc": 0, "budget_web": 1},
+        ).json()["task_id"]
+        rec = _wait(client, tid)
+        assert rec["status"] == "completed", rec.get("error")
+        rep = client.get(f"/research/{tid}/report")
+        assert rep.status_code == 200
+        assert json.loads(rep.text)["report"]["sources"] == []
