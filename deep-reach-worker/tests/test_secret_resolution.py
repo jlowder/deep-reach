@@ -23,6 +23,8 @@ fake keyring, tmp var.env, loopback stubs, no real network):
   last LLM error, never ``completed``; GET /report stays 409.
 - (d) zero sources with drafted sections -> still ``completed`` with the
   UNSOURCED disclosure (existing behavior, unchanged).
+- (e) the settings layer and the pipeline agree on the effective key —
+  one assertion, the two paths must never diverge again.
 
 Run:  venv/bin/python -m pytest tests/test_secret_resolution.py -q
 """
@@ -418,3 +420,12 @@ class TestUnsourcedStillCompletes:
         rep = client.get(f"/research/{tid}/report")
         assert rep.status_code == 200
         assert json.loads(rep.text)["report"]["sources"] == []
+
+
+class TestSettingsAndPipelineAgree:
+    def test_same_effective_key_in_both_paths(self, pin_keyring):
+        """(e) the settings layer and the pipeline must resolve the SAME
+        effective key — one assertion pinning the two paths together so the
+        'Test passes, pipeline 401s' split can never return."""
+        pin_keyring(llm=KEYCHAIN_KEY)
+        assert config_mod.get_config().default_api_key == s.effective_settings()["LLM_API_KEY"]

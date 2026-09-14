@@ -232,6 +232,8 @@ The web settings dialog talks to this service through the unified API glue. Non-
 
 **Secret resolution chain:** OS keyring → environment variable (incl. `var.env` values) → refuse. At worker startup the service idempotently migrates live plaintext keys still sitting in `var.env` into the keyring and blanks those lines (with no keyring backend the file is left alone — the env path keeps working).
 
+**Pipeline parity:** the research pipeline resolves the same three keys through the same chain (`get_config()` → `utils.settings.get_secret`), so the dialog, the Test button, and a live run always use the same key; a run whose LLM key is unresolvable is refused at start with `LLM_API_KEY not set — store it in the OS keychain or set the environment variable LLM_API_KEY`.
+
 **Hot-apply:** saved non-embedding settings apply to the **next** run without a restart (the config singleton is invalidated; OpenAI clients re-cache per endpoint:key). Embedding configuration is frozen at import in the vector store, so any change to `EMBEDDING_*` is reported via `requires_restart` and needs a worker restart.
 
 ### GET /settings
@@ -315,6 +317,8 @@ pending ──▶ running ──▶ completed   pipeline returns a report; stats
 - **pending** — the run was requested while another run was in progress; it waits in the FIFO queue with no thread, `current_step` `"queued"`.
 - **running** — the pump (or an idle POST) started it; a worker thread + watchdog thread are live.
 - **completed / failed** — terminal; the worker's exit triggers the pump, which starts the oldest pending task.
+
+A run that drafted **zero sections** (every section-draft call failed — e.g. a rejected API key: each 401 is caught per section and the run used to "complete" empty) finalizes **failed** with `run produced no sections — last LLM error: <captured error>`; zero *sources* with at least one section still completes, flagged `UNSOURCED` in the terminal step.
 
 Queue advance semantics: the pump runs when a run has **truly stopped** (its run thread has returned and released the pipeline's process lock). Known limitation: Python threads cannot be killed. A run the watchdog has marked failed keeps executing in the background until the pipeline finishes on its own — and the queue advances only at that moment, not when the watchdog fired. Because a queued run can only start after the in-progress one has fully released, a long zombie run simply delays queued tasks; it cannot wedge them permanently.
 
