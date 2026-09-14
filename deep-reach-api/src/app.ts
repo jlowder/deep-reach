@@ -53,6 +53,8 @@ async function route(method: string, path: string, req: Request): Promise<Respon
   if (path === "/settings" && method === "GET") return getSettings(clientSignal(req));
   if (path === "/settings" && method === "PUT") return putSettings(req);
   if (path === "/settings/test" && method === "POST") return postSettingsTest(req);
+  if (path === "/queue" && method === "GET") return getQueue(clientSignal(req));
+  if (path === "/queue" && method === "PUT") return putQueue(req);
 
   const segs = path.split("/").filter((s) => s.length > 0);
   if ((method === "GET" || method === "DELETE") && segs[0] === "research" && segs.length >= 2) {
@@ -200,6 +202,8 @@ function getIndex(): Response {
       "GET /research/{id}/report",
       "GET /research/{id}/download",
       "DELETE /research/{id}",
+      "GET /queue",
+      "PUT /queue",
       "POST /render",
       "GET /documents",
       "POST /documents",
@@ -465,6 +469,30 @@ async function putSettings(req: Request): Promise<Response> {
   return guard("worker", async () => {
     const ct = req.headers.get("content-type") ?? "application/json";
     const { status, data } = await upstreamJson("worker", "/settings", {
+      method: "PUT",
+      headers: { "content-type": ct },
+      body: req.body,
+      signal: clientSignal(req),
+    });
+    return jsonResponse(data, status);
+  });
+}
+
+async function getQueue(signal: AbortSignal | undefined): Promise<Response> {
+  return guard("worker", async () => {
+    // {paused, pending, running} — in-memory on the worker; resets on its
+    // restart. Verbatim passthrough.
+    const { status, data } = await upstreamJson("worker", "/queue", { signal });
+    return jsonResponse(data, status);
+  });
+}
+
+async function putQueue(req: Request): Promise<Response> {
+  return guard("worker", async () => {
+    // {paused: bool}; the worker 400s on anything non-bool — that status +
+    // JSON error body passes through verbatim for the web to display.
+    const ct = req.headers.get("content-type") ?? "application/json";
+    const { status, data } = await upstreamJson("worker", "/queue", {
       method: "PUT",
       headers: { "content-type": ct },
       body: req.body,

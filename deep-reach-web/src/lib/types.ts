@@ -111,6 +111,13 @@ export interface TaskSummary {
   links?: TaskLinks;
 }
 
+/** In-memory queue state: GET /research list body and /health; PUT /queue.
+ *  Resets to active on worker restart; paused runs are unaffected. */
+export interface QueueState {
+  paused: boolean;
+  pending: number;
+}
+
 export interface Documents {
   staged: string[];
   on_disk: string[];

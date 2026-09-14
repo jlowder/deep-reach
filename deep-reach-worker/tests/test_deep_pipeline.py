@@ -37,6 +37,14 @@ wmod = importlib.import_module("worker_agents.writer_agent")
 vmod = importlib.import_module("worker_agents.verifier_agent")
 ra = importlib.import_module("worker_agents.retriever_agent")
 
+
+@pytest.fixture(autouse=True)
+def _llm_key_resolvable(pin_keyring):
+    # deep_research refuses to start when no LLM key resolves (keyring ->
+    # env); pin one so the suite is deterministic on keyring-less hosts.
+    pin_keyring(llm="test-llm-key")
+
+
 # Temp directories holding per-test evidence-cache DBs (P2-2 isolation);
 # cleaned up by the autouse fixture below.
 _CACHE_TMP_DIRS: list = []

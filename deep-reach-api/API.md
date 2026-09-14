@@ -47,6 +47,8 @@ the server binds, with a message naming the variable.
 | GET    | `/research`              | List all tasks (worker), each augmented with `links`              |
 | GET    | `/research/{id}`         | Full task record (worker) + `links`                               |
 | DELETE | `/research/{id}`         | Remove a finished task (worker) — status + body passthrough        |
+| GET    | `/queue`                 | Queue state {paused, pending, running} (worker, passthrough)        |
+| PUT    | `/queue`                 | Pause / resume the worker queue `{paused: bool}` (status + body passthrough) |
 | GET    | `/research/{id}/report`  | Structured report JSON (worker)                                   |
 | GET    | `/research/{id}/download`| Completed run → rendered PDF/HTML bytes (worker report → paperbot) |
 | POST   | `/render`                | Raw passthrough to paperbot's `/render`                           |

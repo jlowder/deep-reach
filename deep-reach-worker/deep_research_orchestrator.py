@@ -55,6 +55,7 @@ _writer_mod = importlib.import_module("worker_agents.writer_agent")
 _verifier_mod = importlib.import_module("worker_agents.verifier_agent")
 from worker_agents.decomposition_agent import decompose_query
 from worker_agents.model_runner import run_model
+import worker_agents.model_runner as _model_runner  # last_llm_error capture
 from worker_agents.retriever_agent import retriever_agent
 from worker_agents.verifier_agent import verification_critic
 from worker_agents.writer_agent import (
@@ -657,13 +658,33 @@ def deep_research(
         stats["llm_calls"] = budget.count
         stats["wall_s"] = round(time.time() - started, 1)
         stats["sections"] = len(sections)
+        stats["last_llm_error"] = _model_runner.last_llm_error
         return {"final_answer": final_answer, "state": state, "stats": stats}
+
+    # Fail fast when the LLM key is unresolvable. The managed key resolves
+    # through the settings chain (utils.settings.get_secret: keyring -> env
+    # -> None); with no resolvable key every pipeline call 401s, every
+    # section fails to draft, and the run would still "complete" as an
+    # empty report. Die here naming the exact variable instead of six
+    # doomed calls.
+    if api_key is None and not (get_config().default_api_key or "").strip():
+        msg = (
+            "LLM_API_KEY not set — store it in the OS keychain or set the "
+            "environment variable LLM_API_KEY"
+        )
+        logger.warning("[DEEP] refusing to start: %s", msg)
+        if verbose:
+            print(f"[DEEP] {msg}")
+        return _finish("", error=msg)
 
     # Serialize deep runs (the tracked run_model swap is process-global).
     # `originals` is pre-bound and the try covers the reset/install pair,
     # so the finally below releases the lock on every exit path; a wedged
     # lock would wedge every later run (and the API's queue pump) forever.
     _deep_run_lock.acquire()
+    # Fresh failure surface for THIS run: last_llm_error is process-global
+    # (run_model) and cleared at the top of the serialized critical section.
+    _model_runner.last_llm_error = None
     originals = None
     try:
         # AFTER the lock: a queued run must not re-arm the writer's shared
@@ -1331,6 +1352,22 @@ def deep_research(
                 title=report_title,
                 subtitle="",
             )
+            if not report.report.sections:
+                # Zero drafted sections is not a report: this is the all-
+                # writers-failed failure mode (e.g. a rejected API key —
+                # every draft call 401s, each exception is caught per
+                # section, and the run used to "complete" as an empty
+                # report). Fail it with the captured LLM error; do NOT set
+                # report_json, so the API layer finalizes the record as
+                # failed and GET /report stays 409.
+                _last = _model_runner.last_llm_error
+                msg = (
+                    "run produced no sections"
+                    + (f" — last LLM error: {_last}" if _last else
+                       " — the LLM returned no usable section output")
+                )
+                _notify_stage(5, msg)
+                return _finish("", error=msg)
             state["report_json"] = report.model_dump_json()
             state["sections"] = [
                 {"id": sq_id, "heading": heading, "text": _section_text_str(text)}
@@ -1418,11 +1455,22 @@ def deep_research(
             )
 
         final_answer = "\n\n".join(final_parts)
-        if not final_answer:
+        if not final_answer and budget.exhausted:
             final_answer = (
                 "Deep research produced no sections: the LLM call budget was "
                 "exhausted before any section could be drafted."
             )
+        if not sections:
+            # Zero drafted sections: the run assembled nothing. Record the
+            # real cause (the API layer finalizes the record failed with
+            # this message instead of the generic "run produced no report")
+            # and surface it in the step timeline.
+            _last = _model_runner.last_llm_error
+            state["final_error"] = (
+                "run produced no sections"
+                + (f" — last LLM error: {_last}" if _last else "")
+            )
+            _notify_stage(5, state["final_error"])
 
         # (c) Machine-side state for save_report / observability.
         state["sections"] = [

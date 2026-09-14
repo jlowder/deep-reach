@@ -57,6 +57,14 @@ def _text_format_param(text_format: Any) -> Dict[str, Any]:
     }
 
 
+# The most recent LLM failure in this process (sanitized), or None when the
+# last call succeeded. run_model raises on failure (callers handle it), but
+# the deep-research orchestrator catches per-section writer failures and the
+# run can still assemble an EMPTY report; it reads this to fail the run with
+# the real cause (e.g. an auth rejection) instead of a generic message.
+last_llm_error: Optional[str] = None
+
+
 # Credential-shaped strings that must never reach a log line verbatim.
 _SECRET_RE = re.compile(
     r"sk-[A-Za-z0-9_\-]{8,}"
@@ -325,7 +333,21 @@ def run_model(
         logger.debug("Calling client.responses.create() with structured output")
     else:
         logger.debug("Calling client.responses.create()")
-    response = client.responses.create(**request)
+
+    global last_llm_error
+    try:
+        response = client.responses.create(**request)
+    except Exception as exc:
+        # Never log the raw exception: it can embed the request body or an
+        # Authorization header; redact credential-shaped strings first.
+        logger.warning(
+            "[RUN_MODEL] call failed (%s): %s",
+            _sanitize_span(type(exc).__name__),
+            _sanitize_span(str(exc))[:300],
+        )
+        last_llm_error = _sanitize_span(f"{type(exc).__name__}: {exc}")[:2000]
+        raise
+    last_llm_error = None
     # The local MLX server occasionally returns a response whose `output`
     # is None (model glitch); reading .output_text on it raises TypeError.
     # Normalize to an empty list so every caller's fallback path engages

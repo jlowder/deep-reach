@@ -16,7 +16,7 @@ import { fmtClock } from "@/lib/format";
 import { useTaskDetail, useTasks } from "@/lib/useTasks";
 
 export default function Page() {
-  const { tasks, error, lastUpdate, refresh, removeTask } = useTasks();
+  const { tasks, queue, error, lastUpdate, refresh, removeTask } = useTasks();
   const [explicitId, setExplicitId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsTrigger = useRef<HTMLButtonElement>(null);
@@ -48,8 +48,6 @@ export default function Page() {
     (selectedSummary.status === "running" || selectedSummary.status === "pending");
   const { task: detailTask, error: detailError } = useTaskDetail(selectedId, detailActive);
 
-  const pendingCount = tasks?.filter((t) => t.status === "pending").length ?? 0;
-  const runningCount = tasks?.filter((t) => t.status === "running").length ?? 0;
   const queuePosition =
     selectedSummary?.status === "pending" && tasks
       ? tasks.filter((t) => t.status === "pending").findIndex((t) => t.id === selectedId) + 1
@@ -61,8 +59,9 @@ export default function Page() {
     <ErrorBoundary>
       <div className="grid min-h-dvh grid-cols-1 min-[960px]:grid-cols-[320px_1fr]">
       <Rail
-        pendingCount={pendingCount}
-        runningCount={runningCount}
+        queue={queue}
+        queueSyncedAt={lastUpdate}
+        queueSyncFailed={error !== null}
         onCreated={(id) => {
           setExplicitId(id);
           void refresh();
@@ -79,6 +78,11 @@ export default function Page() {
           {tasks && (
             <span className="border border-hairline bg-surface px-1.5 py-0.5 font-mono text-[11px]">
               {tasks.length}
+            </span>
+          )}
+          {queue.paused && (
+            <span className="border border-wait/40 bg-wait/15 px-1.5 py-0.5 font-display text-[11px] uppercase tracking-[0.1em] text-wait">
+              paused
             </span>
           )}
           <span className="ml-auto font-mono text-[10px] uppercase tracking-[0.12em] text-dim/70">
