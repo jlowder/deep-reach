@@ -7,35 +7,29 @@ import { escapeHtml, renderBlock, renderMathText, renderReferences } from "./blo
 import { REPORT_CSS, MATH_CSS } from "./css.js";
 import { katexStylesheet } from "./math.js";
 
-const MONTHS = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
-];
-
 /**
- * Format an ISO date (or date-only string) as "August 26, 2026".
+ * Format an ISO date (or date-only string) as "September 13, 2026" — the
+ * calendar date of the instant in the LOCAL timezone (or the given
+ * `timeZone` when provided). A report created at 8 PM US time is dated with
+ * the day it was actually created, not the next-day UTC date (the old
+ * getUTC* path rendered the UTC calendar date).
  * Returns "" when the input is missing or unparseable.
  */
-export function formatDate(value: string): string {
+export function formatDate(value: string, timeZone?: string): string {
   if (value.trim() === "") return "";
   const t = Date.parse(value);
   if (Number.isNaN(t)) return "";
   const d = new Date(t);
-  const month = MONTHS[d.getUTCMonth()];
-  const day = d.getUTCDate();
-  const year = d.getUTCFullYear();
-  if (year < 1000) return "";
-  return `${month} ${day}, ${year}`;
+  if (d.getUTCFullYear() < 1000) return "";
+  const parts = new Intl.DateTimeFormat("en", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    ...(timeZone !== undefined ? { timeZone } : {}),
+  }).formatToParts(d);
+  const part = (type: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("month")} ${part("day")}, ${part("year")}`;
 }
 
 /** "deep_research" -> "Deep Research" for the meta pill. */
