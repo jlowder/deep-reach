@@ -63,23 +63,37 @@ const PERIOD_FIRST_WORD_EXCEPTIONS = new Set([
 ]);
 
 /**
- * True when a text segment ends a sentence that is missing its terminal
- * period: it ends in a plain letter/digit (not . ! ? : ; or a closing
- * quote) and the next segment in the same paragraph starts a new sentence —
- * an uppercase letter whose first word is not one of the cross-reference /
- * honorific heads above. The renderer uses this to append the period before
- * the citation sup ("gravity [2]. Gas", not "gravity [2] Gas").
+ * True when a segment ends a sentence that is missing its terminal period
+ * on plain-text grounds: it ends in a letter/digit (not . ! ? : ; or a
+ * closing quote) — the worker's `_ends_plain_word`.
  */
-export function needsTerminalPeriod(text: string, nextText: string): boolean {
+function endsInPlainWord(text: string): boolean {
   const t = text.trim();
-  if (t === "") return false;
-  if (!/[\p{L}\p{N}]/u.test(t[t.length - 1])) return false;
-  const next = nextText.trim();
+  return t !== "" && /[\p{L}\p{N}]/u.test(t[t.length - 1]);
+}
+
+/**
+ * True when a segment starts a new sentence: an uppercase letter whose first
+ * word is not one of the cross-reference / honorific heads above (the
+ * worker's `_next_starts_new_sentence`).
+ */
+function startsNewSentence(text: string): boolean {
+  const next = text.trim();
   if (next === "") return false;
   if (!/^\p{Lu}/u.test(next)) return false;
   const m = /^([A-Za-z]+(?:\.[A-Za-z]+)*)/.exec(next);
   if (m === null) return false;
   return !PERIOD_FIRST_WORD_EXCEPTIONS.has(m[1]!.replace(/\.+$/, "").toLowerCase());
+}
+
+/**
+ * True when a text segment ends a sentence that is missing its terminal
+ * period: it ends in a plain letter/digit and the next segment in the same
+ * paragraph starts a new sentence. The renderer uses this to append the
+ * period before the citation sup ("gravity [2]. Gas", not "gravity [2] Gas").
+ */
+export function needsTerminalPeriod(text: string, nextText: string): boolean {
+  return endsInPlainWord(text) && startsNewSentence(nextText);
 }
 
 /** Per-event marker; the block renderer aggregates it into one entry. */
@@ -116,54 +130,32 @@ function aggregatePeriodWarnings(warnings: string[]): void {
  * ending in a math group has no terminal punct (the formula is
  * self-contained) and the sup, if any, follows it.
  *
- * `nextText` (the next span in the same paragraph, when known) enables the
- * missing-period repair (worker R2 mirror): a CITED span that ends in a
- * plain letter/digit while the next span starts a new sentence gets a
- * terminal "." appended before the sup is placed, so the established
- * sup-before-period ordering yields "gravity [2].". Never fires for an
- * uncited span (no sup to attach to), never at a paragraph end (no
- * `nextText`), never when the next starts lowercase or with an exception
- * head.
+ * The missing-period repair (worker R2 mirror) is NOT done here: it must run
+ * on the span list BEFORE the repeated-cite collapse (worker order R2 -> R3),
+ * because a repaired span is terminal and therefore must not join a clause
+ * run. See applyTerminalPeriodRepairs.
  */
-function renderCitedText(
-  text: string,
-  positions: readonly number[],
-  warnings: string[],
-  nextText?: string,
-): string {
+function renderCitedText(text: string, positions: readonly number[], warnings: string[]): string {
   const raw = text.trim();
   const sup = citationSup(positions);
   const segments = splitMath(raw);
 
   // Empty / zero-width input (e.g. a cell whose text normalized to ""):
-  // splitMath yields zero segments, and the trailing-segment index below
+  // splitMath yields zero segmentS, and the trailing-segment index below
   // would read `undefined.kind`. Render empty: an empty cell stays an
   // empty cell.
   if (raw === "" || segments.length === 0) return "";
 
-  // The missing-period repair must land on the segment the terminal-punct
-  // rule operates on: the whole text when math is absent, the trailing text
-  // segment when it is present (a span ending in a math group gets none —
-  // the formula is self-contained).
-  const repair = (t: string): string => {
-    if (sup !== "" && nextText !== undefined && needsTerminalPeriod(t, nextText)) {
-      warnings.push(PERIOD_INSERTED_MARK);
-      return t + ".";
-    }
-    return t;
-  };
-
   if (segments.length === 1 && segments[0].kind === "text") {
     // No math markers: whole-text punct rule (unchanged legacy behavior).
-    const body = repair(raw);
-    const m = body.match(/^(.*?)([.!?]+)$/s);
+    const m = raw.match(/^(.*?)([.!?]+)$/s);
     if (m) {
       const base = m[1].replace(/\s+$/, "");
       const punct = m[2];
       if (sup) return (base ? escapeHtml(base) + " " : " ") + sup + escapeHtml(punct);
       return escapeHtml(base + punct);
     }
-    return escapeHtml(body) + sup;
+    return escapeHtml(raw) + sup;
   }
 
   // Math present: render segment by segment; text segments are escaped.
@@ -181,15 +173,14 @@ function renderCitedText(
       out += escapeHtml(seg.text);
       continue;
     }
-    const t = repair(seg.text);
-    const m = t.match(/^(.*?)([.!?]+)$/s);
+    const m = seg.text.match(/^(.*?)([.!?]+)$/s);
     if (m) {
       const base = m[1].replace(/\s+$/, "");
       const punct = m[2];
       if (sup) out += (base ? escapeHtml(base) + " " : " ") + sup + escapeHtml(punct);
       else out += escapeHtml(base + punct);
     } else {
-      out += escapeHtml(t);
+      out += escapeHtml(seg.text);
     }
   }
   if (segments[segments.length - 1].kind === "math" && sup !== "") out += sup;
@@ -197,8 +188,8 @@ function renderCitedText(
 }
 
 /** Render one span: see renderCitedText for the citation ordering rules. */
-function renderSpan(span: Span, warnings: string[], nextText?: string): string {
-  return renderCitedText(span.text, span.sourcePositions, warnings, nextText);
+function renderSpan(span: Span, warnings: string[]): string {
+  return renderCitedText(span.text, span.sourcePositions, warnings);
 }
 
 /**
@@ -232,18 +223,123 @@ function startsWithMathOrWord(t: string): boolean {
 }
 
 /**
+ * True when a span's text ends in a citation key group (single key or
+ * multi-key group) — the worker's second "why repair" condition: a span
+ * whose only trailing citation is a (kept, unresolvable) key group still
+ * ends a sentence and gets the period.
+ */
+function endsKeyGroup(text: string): boolean {
+  const t = text.trim();
+  return t !== "" && /\[(?:[WD]\d+(?:\s*,\s*[WD]\d+)*)\]$/.test(t);
+}
+
+/**
+ * Missing-terminal-period repair (worker R2 mirror), applied to a prose span
+ * list BEFORE rendering and — crucially — before the repeated-cite collapse
+ * (worker order: R2 then R3, so a repaired span is terminal and cannot join
+ * a clause run). A span that (a) ends in a plain letter/digit (not . ! ? : ;
+ * or a closing quote), (b) carries a citation (non-empty sourcePositions) or
+ * ends in a key group, and (c) is followed in the same paragraph by a span
+ * that starts a new sentence (uppercase, non-exception first word) gets a
+ * terminal "." appended to its text; the established sup-before-period
+ * ordering then yields "gravity [2].". Never at a paragraph end (no next
+ * span), never for an uncited span with no trailing key group. Returns fresh
+ * span objects; per-event warnings use PERIOD_INSERTED_MARK (aggregated by
+ * the caller).
+ */
+export function applyTerminalPeriodRepairs(spans: Span[], warnings: string[]): Span[] {
+  return spans.map((s, i) => {
+    const hasNext = i + 1 < spans.length;
+    if (!hasNext) return s;
+    if (s.sourcePositions.length === 0 && !endsKeyGroup(s.text)) return s;
+    const due =
+      (endsInPlainWord(s.text) || endsKeyGroup(s.text)) && startsNewSentence(spans[i + 1].text);
+    if (!due) return s;
+    warnings.push(PERIOD_INSERTED_MARK);
+    return { ...s, text: s.text + "." };
+  });
+}
+
+/**
+ * True when a span's text ends a sentence: last char is a terminal mark
+ * (. ! ? : ;), or a closing quote that a terminal mark precedes
+ * ("done.") — the worker's `_ends_terminal`.
+ */
+function endsTerminal(text: string): boolean {
+  const t = text.trim();
+  if (t === "") return false;
+  if (/[.!?;]/.test(t[t.length - 1])) return true;
+  return /[\"'\u201d\u2019]/.test(t[t.length - 1]) && /[.!?;]/.test(t[t.length - 2]);
+}
+
+/**
+ * Repeated clause-cite collapse (worker R3 mirror, same algorithm): within
+ * one prose block (paragraph/quote/callout), consecutive spans sharing the
+ * IDENTICAL non-empty citation set form one over-fragmented logical sentence
+ * (the model re-attached the same citation to every clause) — the renderer
+ * would otherwise print "[1]" after each clause. The same-cite run extends
+ * across terminal spans too; at every span that ends a sentence (or at the
+ * run's end), every earlier span of the trailing clause segment is cleared
+ * (its sup is not printed) while the sentence-final span keeps its
+ * citation. Distinct sentences that legitimately re-cite the same source
+ * therefore keep both sups. List items and table cells are out of scope
+ * (the producer fragments prose spans, not cells). Returns fresh span
+ * objects; the input model is not mutated.
+ */
+export function collapseRepeatedClauseCites(
+  spans: Span[],
+): { spans: Span[]; suppressed: number } {
+  const out: Span[] = spans.map((s) => ({ ...s, sourcePositions: [...s.sourcePositions] }));
+  let suppressed = 0;
+  const n = out.length;
+  let i = 0;
+  while (i < n) {
+    if (out[i].sourcePositions.length === 0) {
+      i += 1;
+      continue;
+    }
+    const sig = JSON.stringify(out[i].sourcePositions);
+    let j = i;
+    while (j + 1 < n && JSON.stringify(out[j + 1].sourcePositions) === sig) {
+      j += 1;
+    }
+    if (j > i) {
+      let segStart = i;
+      for (let k = i; k <= j; k += 1) {
+        const isEnd = k === j || endsTerminal(out[k].text);
+        if (!isEnd) continue;
+        let allClause = true;
+        for (let x = segStart; x < k; x += 1) {
+          if (endsTerminal(out[x].text)) {
+            allClause = false;
+            break;
+          }
+        }
+        if (k - segStart + 1 >= 2 && allClause) {
+          for (let x = segStart; x < k; x += 1) {
+            out[x].sourcePositions = [];
+            suppressed += 1;
+          }
+        }
+        segStart = k + 1;
+      }
+    }
+    i = j + 1;
+  }
+  return { spans: out, suppressed };
+}
+
+/**
  * Join span texts for a paragraph/quote: a single space is inserted before a
  * span only when its trimmed text starts with a letter, digit, or math
  * delimiter (see startsWithMathOrWord); spans starting with other
- * punctuation (e.g. a lone ".") glue directly to the prior span. Each span
- * is rendered with the next span's text as context so the renderer can apply
- * the missing-terminal-period repair (worker R2 mirror) to cited spans.
+ * punctuation (e.g. a lone ".") glue directly to the prior span.
  */
 function joinSpans(spans: Span[], warnings: string[]): string {
   let out = "";
-  for (let i = 0; i < spans.length; i += 1) {
-    if (out !== "" && startsWithMathOrWord(spans[i].text.trim())) out += " ";
-    out += renderSpan(spans[i], warnings, i + 1 < spans.length ? spans[i + 1].text : undefined);
+  for (const span of spans) {
+    if (out !== "" && startsWithMathOrWord(span.text.trim())) out += " ";
+    out += renderSpan(span, warnings);
   }
   return out;
 }
@@ -290,7 +386,14 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
 
     case "paragraph": {
       const warnings: string[] = [];
-      const html = `<p>${joinSpans(block.spans, warnings)}</p>`;
+      // Worker assembly order: R2 (period repair) then R3 (clause-run
+      // collapse) — a repaired span is terminal, so it must not join a run.
+      const repaired = applyTerminalPeriodRepairs(block.spans, warnings);
+      const { spans, suppressed } = collapseRepeatedClauseCites(repaired);
+      if (suppressed > 0) {
+        warnings.push(`citations: suppressed ${suppressed} repeated clause citation(s)`);
+      }
+      const html = `<p>${joinSpans(spans, warnings)}</p>`;
       aggregatePeriodWarnings(warnings);
       reportWarnings(warnings, opts);
       return html;
@@ -298,7 +401,12 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
 
     case "quote": {
       const warnings: string[] = [];
-      const html = `<div class="quote">${joinSpans(block.spans, warnings)}</div>`;
+      const repaired = applyTerminalPeriodRepairs(block.spans, warnings);
+      const { spans, suppressed } = collapseRepeatedClauseCites(repaired);
+      if (suppressed > 0) {
+        warnings.push(`citations: suppressed ${suppressed} repeated clause citation(s)`);
+      }
+      const html = `<div class="quote">${joinSpans(spans, warnings)}</div>`;
       aggregatePeriodWarnings(warnings);
       reportWarnings(warnings, opts);
       return html;
@@ -310,10 +418,16 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
       // The producer splits a sentence into spans ("...open problems" [41]
       // + "and call for ..." [43]); a span that continues the previous one
       // joins the last <p> instead of breaking the line mid-sentence.
+      // Same worker order as the paragraph case: R2 then R3.
+      const repaired = applyTerminalPeriodRepairs(block.spans, warnings);
+      const { spans, suppressed } = collapseRepeatedClauseCites(repaired);
+      if (suppressed > 0) {
+        warnings.push(`citations: suppressed ${suppressed} repeated clause citation(s)`);
+      }
       const paras: string[] = [];
-      for (let i = 0; i < block.spans.length; i += 1) {
-        const s = block.spans[i];
-        const rendered = renderSpan(s, warnings, i + 1 < block.spans.length ? block.spans[i + 1].text : undefined);
+      for (let i = 0; i < spans.length; i += 1) {
+        const s = spans[i];
+        const rendered = renderSpan(s, warnings);
         if (paras.length > 0) {
           const sep = continuesPrevious(s.text);
           if (sep !== null) {
