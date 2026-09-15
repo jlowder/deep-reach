@@ -41,9 +41,66 @@ function isSafeUrl(url: string): boolean {
   }
 }
 
-/** Flush renderer-side warnings (math fallbacks, skipped figures, ...). */
+/**
+ * Flush renderer-side warnings (math fallbacks, skipped figures, ...).
+ * Empty entries are aggregation placeholders (see aggregatePeriodWarnings).
+ */
 function reportWarnings(warnings: readonly string[], opts: BlockRenderOptions): void {
-  for (const w of warnings) opts.onWarning?.(w);
+  for (const w of warnings) if (w !== "") opts.onWarning?.(w);
+}
+
+/**
+ * First-word heads that legitimately start the next segment without a period
+ * after the prior one: cross-references and honorifics ("Figure 2 shows", "a
+ * NASA survey", "Dr. Smith"). Inserting a period before them would create a
+ * false sentence boundary (worker R2's exception set; compared against the
+ * next segment's first word, trailing dots dropped, casefolded).
+ */
+const PERIOD_FIRST_WORD_EXCEPTIONS = new Set([
+  "figure", "table", "fig", "eq", "section", "appendix", "vol", "no",
+  "dr", "mr", "mrs", "st", "us", "uk", "eu", "nasa",
+  "e.g", "i.e", "eg", "ie", "etc", "min", "max", "ref", "src", "p", "pp", "h", "k",
+]);
+
+/**
+ * True when a text segment ends a sentence that is missing its terminal
+ * period: it ends in a plain letter/digit (not . ! ? : ; or a closing
+ * quote) and the next segment in the same paragraph starts a new sentence —
+ * an uppercase letter whose first word is not one of the cross-reference /
+ * honorific heads above. The renderer uses this to append the period before
+ * the citation sup ("gravity [2]. Gas", not "gravity [2] Gas").
+ */
+export function needsTerminalPeriod(text: string, nextText: string): boolean {
+  const t = text.trim();
+  if (t === "") return false;
+  if (!/[\p{L}\p{N}]/u.test(t[t.length - 1])) return false;
+  const next = nextText.trim();
+  if (next === "") return false;
+  if (!/^\p{Lu}/u.test(next)) return false;
+  const m = /^([A-Za-z]+(?:\.[A-Za-z]+)*)/.exec(next);
+  if (m === null) return false;
+  return !PERIOD_FIRST_WORD_EXCEPTIONS.has(m[1]!.replace(/\.+$/, "").toLowerCase());
+}
+
+/** Per-event marker; the block renderer aggregates it into one entry. */
+const PERIOD_INSERTED_MARK = "citations: inserted a missing terminal period";
+
+/**
+ * Collapse the per-event missing-period markers into a single aggregated
+ * entry ("citations: inserted N missing terminal period(s)") — the same
+ * one-entry-per-event-type pattern the resolver warnings use.
+ */
+function aggregatePeriodWarnings(warnings: string[]): void {
+  let n = 0;
+  for (const w of warnings) if (w === PERIOD_INSERTED_MARK) n += 1;
+  if (n === 0) return;
+  const aggregated = `citations: inserted ${n} missing terminal period(s)`;
+  let first = true;
+  for (let i = 0; i < warnings.length; i += 1) {
+    if (warnings[i] !== PERIOD_INSERTED_MARK) continue;
+    warnings[i] = first ? aggregated : "";
+    first = false;
+  }
 }
 
 /**
@@ -58,8 +115,22 @@ function reportWarnings(warnings: readonly string[], opts: BlockRenderOptions): 
  * "word."). Without a citation the text just normalizes to "word."; a span
  * ending in a math group has no terminal punct (the formula is
  * self-contained) and the sup, if any, follows it.
+ *
+ * `nextText` (the next span in the same paragraph, when known) enables the
+ * missing-period repair (worker R2 mirror): a CITED span that ends in a
+ * plain letter/digit while the next span starts a new sentence gets a
+ * terminal "." appended before the sup is placed, so the established
+ * sup-before-period ordering yields "gravity [2].". Never fires for an
+ * uncited span (no sup to attach to), never at a paragraph end (no
+ * `nextText`), never when the next starts lowercase or with an exception
+ * head.
  */
-function renderCitedText(text: string, positions: readonly number[], warnings: string[]): string {
+function renderCitedText(
+  text: string,
+  positions: readonly number[],
+  warnings: string[],
+  nextText?: string,
+): string {
   const raw = text.trim();
   const sup = citationSup(positions);
   const segments = splitMath(raw);
@@ -70,16 +141,29 @@ function renderCitedText(text: string, positions: readonly number[], warnings: s
   // empty cell.
   if (raw === "" || segments.length === 0) return "";
 
+  // The missing-period repair must land on the segment the terminal-punct
+  // rule operates on: the whole text when math is absent, the trailing text
+  // segment when it is present (a span ending in a math group gets none —
+  // the formula is self-contained).
+  const repair = (t: string): string => {
+    if (sup !== "" && nextText !== undefined && needsTerminalPeriod(t, nextText)) {
+      warnings.push(PERIOD_INSERTED_MARK);
+      return t + ".";
+    }
+    return t;
+  };
+
   if (segments.length === 1 && segments[0].kind === "text") {
     // No math markers: whole-text punct rule (unchanged legacy behavior).
-    const m = raw.match(/^(.*?)([.!?]+)$/s);
+    const body = repair(raw);
+    const m = body.match(/^(.*?)([.!?]+)$/s);
     if (m) {
       const base = m[1].replace(/\s+$/, "");
       const punct = m[2];
       if (sup) return (base ? escapeHtml(base) + " " : " ") + sup + escapeHtml(punct);
       return escapeHtml(base + punct);
     }
-    return escapeHtml(raw) + sup;
+    return escapeHtml(body) + sup;
   }
 
   // Math present: render segment by segment; text segments are escaped.
@@ -87,7 +171,7 @@ function renderCitedText(text: string, positions: readonly number[], warnings: s
   // span ending in a math group has no terminal punct (the formula is
   // self-contained); the sup, if any, follows the trailing group.
   let out = "";
-  for (let i = 0; i < segments.length; i++) {
+  for (let i = 0; i < segments.length; i += 1) {
     const seg = segments[i];
     if (seg.kind === "math") {
       out += renderMath(seg.tex, seg.display, warnings, "inline");
@@ -97,14 +181,15 @@ function renderCitedText(text: string, positions: readonly number[], warnings: s
       out += escapeHtml(seg.text);
       continue;
     }
-    const m = seg.text.match(/^(.*?)([.!?]+)$/s);
+    const t = repair(seg.text);
+    const m = t.match(/^(.*?)([.!?]+)$/s);
     if (m) {
       const base = m[1].replace(/\s+$/, "");
       const punct = m[2];
       if (sup) out += (base ? escapeHtml(base) + " " : " ") + sup + escapeHtml(punct);
       else out += escapeHtml(base + punct);
     } else {
-      out += escapeHtml(seg.text);
+      out += escapeHtml(t);
     }
   }
   if (segments[segments.length - 1].kind === "math" && sup !== "") out += sup;
@@ -112,8 +197,8 @@ function renderCitedText(text: string, positions: readonly number[], warnings: s
 }
 
 /** Render one span: see renderCitedText for the citation ordering rules. */
-function renderSpan(span: Span, warnings: string[]): string {
-  return renderCitedText(span.text, span.sourcePositions, warnings);
+function renderSpan(span: Span, warnings: string[], nextText?: string): string {
+  return renderCitedText(span.text, span.sourcePositions, warnings, nextText);
 }
 
 /**
@@ -150,13 +235,15 @@ function startsWithMathOrWord(t: string): boolean {
  * Join span texts for a paragraph/quote: a single space is inserted before a
  * span only when its trimmed text starts with a letter, digit, or math
  * delimiter (see startsWithMathOrWord); spans starting with other
- * punctuation (e.g. a lone ".") glue directly to the prior span.
+ * punctuation (e.g. a lone ".") glue directly to the prior span. Each span
+ * is rendered with the next span's text as context so the renderer can apply
+ * the missing-terminal-period repair (worker R2 mirror) to cited spans.
  */
 function joinSpans(spans: Span[], warnings: string[]): string {
   let out = "";
-  for (const span of spans) {
-    if (out !== "" && startsWithMathOrWord(span.text.trim())) out += " ";
-    out += renderSpan(span, warnings);
+  for (let i = 0; i < spans.length; i += 1) {
+    if (out !== "" && startsWithMathOrWord(spans[i].text.trim())) out += " ";
+    out += renderSpan(spans[i], warnings, i + 1 < spans.length ? spans[i + 1].text : undefined);
   }
   return out;
 }
@@ -204,6 +291,7 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
     case "paragraph": {
       const warnings: string[] = [];
       const html = `<p>${joinSpans(block.spans, warnings)}</p>`;
+      aggregatePeriodWarnings(warnings);
       reportWarnings(warnings, opts);
       return html;
     }
@@ -211,6 +299,7 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
     case "quote": {
       const warnings: string[] = [];
       const html = `<div class="quote">${joinSpans(block.spans, warnings)}</div>`;
+      aggregatePeriodWarnings(warnings);
       reportWarnings(warnings, opts);
       return html;
     }
@@ -222,8 +311,9 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
       // + "and call for ..." [43]); a span that continues the previous one
       // joins the last <p> instead of breaking the line mid-sentence.
       const paras: string[] = [];
-      for (const s of block.spans) {
-        const rendered = renderSpan(s, warnings);
+      for (let i = 0; i < block.spans.length; i += 1) {
+        const s = block.spans[i];
+        const rendered = renderSpan(s, warnings, i + 1 < block.spans.length ? block.spans[i + 1].text : undefined);
         if (paras.length > 0) {
           const sep = continuesPrevious(s.text);
           if (sep !== null) {
@@ -240,6 +330,7 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
       const html = `<div class="callout ${block.calloutType}"><span class="callout-title">${escapeHtml(
         title,
       )}</span>${body}</div>`;
+      aggregatePeriodWarnings(warnings);
       reportWarnings(warnings, opts);
       return html;
     }
