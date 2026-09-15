@@ -161,6 +161,19 @@ Non-fatal issues still produce a 200 body; the count is in
 
 - `36 unresolvable citation references (numeric index out of range for 18 sources)`
 - `7 citation marker(s) without a matching source citation_key (stripped)`
+- `citations: removed N redundant key group(s) (numbers already cited)` (a
+  multi-key group like `[W2, W5, W17]` whose keys all resolve to display
+  numbers — the prose copy of the citation is redundant, so the group is
+  stripped and the resolved keys union into the citation; worker linter R1
+  mirror)
+- `citations: kept "…[W2, W19]" (1 unresolved key)` (same, but one key has no
+  resolvable citation — the group is the only visible trace, so it stays)
+- `citations: inserted N missing terminal period(s)` (a cited span that ends
+  a sentence without punctuation — the renderer appends `.` before the
+  citation, e.g. `…powered by gravity [2]. Gas…`; worker linter R2 mirror)
+- `citations: suppressed N repeated clause citation(s)` (one sentence split
+  into clause spans that re-cite the same sources — the sup is printed on
+  the last span only; worker linter R3 mirror)
 - `citation 42 has no source anchor`
 - `math: <KaTeX error message>` (the offending formula falls back to visible escaped text)
 - `math fallback: unbalanced braces in equation — showing raw LaTeX` (a display
