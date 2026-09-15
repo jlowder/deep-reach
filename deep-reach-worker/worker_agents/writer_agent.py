@@ -309,7 +309,10 @@ CONTRACT — all of these are mandatory:
    its bare title or subject WITHOUT brackets (e.g. "LG AI Research's
    EXAONE Forecast for Finance"); put citation keys only in the citations
    field or as a single [D1]-form marker at the end of the sentence. Never
-   wrap a source title in brackets in prose. Never write empty brackets,
+   wrap a source title in brackets in prose. A span that ends a sentence
+   MUST end its text with terminal punctuation (. ! ?) — the citation is
+   attached after that punctuation; never end a cited span on a bare word.
+   Never write empty brackets,
    placeholder brackets, or "[]" anywhere in the text — a sentence with no
    source support simply has no citation marker. If the Evidence block is
    empty:
@@ -347,7 +350,7 @@ CONTRACT — all of these are mandatory:
    and fold the material into the surrounding prose.
 
 Example of one paragraph block with per-sentence citation spans:
-{"type":"paragraph","spans":[{"text":"Grid-scale deployment rose sharply","citations":[]},{"text":"in several major electricity markets","citations":["D1","W2"]},{"text":"through 2024","citations":["D1"]}]}
+{"type":"paragraph","spans":[{"text":"Grid-scale deployment rose sharply","citations":[]},{"text":"in several major electricity markets","citations":["D1","W2"]},{"text":"through 2024.","citations":["D1"]}]}
 
 Example of a subsection with inline math — mirror this exact shape (every
 formula delimited in $...$, prose words and citations outside the math, and
@@ -375,7 +378,13 @@ CONTRACT — all of these are mandatory:
    findings of the report.
 5. Citations: you may use ONLY [D#]/[W#] keys that appear in the provided
    section texts, and only at the end of the sentence they support — never
-   invent a key. A pure-synthesis sentence with no source support has an
+   invent a key. The [W#]/[D#] markers you see in the provided section
+   texts are placement markers only: put the keys they indicate into the
+   citations field, and NEVER write [W#] or [D#] keys into your prose —
+   refer to sources by their titles in prose instead. A span that ends a
+   sentence MUST end its text with terminal punctuation (. ! ?) — the
+   citation is attached after that punctuation; never end a cited span on
+   a bare word. A pure-synthesis sentence with no source support has an
    EMPTY citations array in the JSON and no citation marker in the text —
    never write "[]" or any empty brackets in the text.
 6. Do NOT introduce new factual claims not present in the provided
@@ -855,7 +864,9 @@ CONTRACT — all of these are mandatory:
    findings of the report.
 5. Citations: you may use ONLY [D#]/[W#] keys that appear in the provided
    section texts, and only at the end of a sentence they support — never
-   invent a key. A pure-synthesis sentence may carry no citation.
+   invent a key. A sentence that carries a citation MUST end with terminal
+   punctuation (. ! ?) after the key. A pure-synthesis sentence may carry
+   no citation.
 6. Do NOT introduce new factual claims not present in the provided
    sections: you are connecting what is already there, not researching.
 """ + _MATH_RULES_MD
