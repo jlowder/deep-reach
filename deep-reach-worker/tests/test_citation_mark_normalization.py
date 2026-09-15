@@ -380,6 +380,9 @@ def test_assembly_quality_normalized_citations_counters():
         "adjacent_duplicates_collapsed": 1,  # the doubled title
         "title_brackets_stripped": 3,  # callout single + callout collapsed + exec summary
         "empty_brackets_removed": 2,  # synthesis + exec summary
+        "key_groups_removed": 0,  # no [W#]/[D#] groups in this scenario
+        "terminal_periods_inserted": 0,  # spans already terminated / lone
+        "repeated_cites_collapsed": 0,  # no identical consecutive runs
     }
     # the pre-existing verification keys survive alongside the new one
     assert report.quality.verification["unresolvable_citations"] == []

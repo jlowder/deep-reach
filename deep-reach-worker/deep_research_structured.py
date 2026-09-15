@@ -702,6 +702,256 @@ def _normalize_citation_marks(report: ResearchReport) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Citation-format linter (deterministic assembly-time repair)
+# ---------------------------------------------------------------------------
+#
+# Repairs the citation-format artifact classes that survived assembly into
+# the renderer (recovered from real task 3803fb3c — luminous black-hole
+# objects report; see the _normalize_citation_marks docstring for the
+# earlier classes). Three guarded rules, in order, per paragraph span
+# sequence:
+#
+#   R1 key_groups_removed — a span whose text carries a literal bracket
+#      group of citation keys (``[W20]``, ``[W2, W5, W17]``) AND a
+#      non-empty citations array renders a REDUNDANT double group in the
+#      UI: paperbot resolves the array into number superscripts AND
+#      re-prints the key group (its strip regex matches single keys only,
+#      so multi-key groups always survive). The keys add nothing — the
+#      renderer resolves them from the array — so the group is stripped
+#      when every key in it is registered; the numbers remain the single
+#      visible citation. Groups containing an UNREGISTERED key are left
+#      in place (the group is then the only trace of the reference).
+#   R2 terminal_periods_inserted — a sentence-final span whose text ends
+#      in a bare word (no ``. ! ? : ;``) with a citation attached rendered
+#      ``…powered by gravity [2] Gas falling…``: the period is simply
+#      missing (the writer prompt never regulated terminal punctuation).
+#      A ``.`` is appended when the span ends in a letter/digit or a
+#      citation key group (the renderer will attach something at the very
+#      end) AND the NEXT span in the same paragraph starts a new sentence
+#      (uppercase first word, not in the exception set: Figure, Table,
+#      NASA, e.g., …). Mid-sentence (lowercase-after) and paragraph-final
+#      spans are never touched; math ends are never touched.
+#   R3 repeated_cites_collapsed — one logical sentence over-fragmented
+#      into clause spans, each carrying the SAME citation, rendered
+#      ``…[1] …[1] …[1]``. A run of >=2 consecutive spans with identical
+#      non-empty citation sets keeps the citations only on the LAST span;
+#      real sentence boundaries (a span ending in a terminal mark) break
+#      runs, so two DISTINCT sentences that both cite the same key keep
+#      both citations (the writer prompt explicitly allows key reuse
+#      across sentences).
+#
+# Safety: every rule is guarded; when a rule is unsure (unregistered key,
+# ambiguous adjacency, paragraph boundary, math) it does NOTHING — failing
+# forward to "leave it" is the safe direction. The pass is idempotent (a
+# second run changes nothing) and never alters span text beyond the three
+# targeted operations. Never raises.
+
+# A bracket group whose ENTIRE content is a comma-separated list of
+# citation keys (W\d+ / D\d+, any count, internal spaces tolerated).
+_KEY_GROUP_RE = re.compile(r"\[(?:[WD]\d+)(?:\s*,\s*[WD]\d+)*\]")
+# Individual keys inside such a group (to verify every one is registered).
+_KEY_GROUP_KEY_RE = re.compile(r"[WD]\d+")
+# Terminal-mark set for R2 / R3 (plus the closing-quote-after-one shape).
+_TERMINAL_PUNCT = ".!?:;"
+_CLOSING_QUOTES = "\"'\u201d\u2019"
+# First word of a span: letters with optional dot-joins ("e.g.", "i.e.").
+_FIRST_WORD_RE = re.compile(r"^\s*([A-Za-z]+(?:\.[A-Za-z]+)*)(?![\w.])")
+# Words that legitimately open a sentence after a citation WITHOUT a
+# preceding period (figure/table references, titles, acronyms) — R2 must
+# not insert one before these (compared case-insensitively, dots dropped).
+_FIRST_WORD_EXCEPTIONS = {
+    "figure", "table", "fig", "eq", "section", "appendix", "vol", "no",
+    "dr", "mr", "mrs", "st", "us", "uk", "eu", "nasa", "eg", "ie", "etc",
+    "min", "max", "ref", "src", "p", "pp", "h", "k",
+}
+
+
+def _ends_terminal(text: str) -> bool:
+    """True when the right-stripped text ends in a terminal mark: one of
+    ``.!?:;``, or a closing quote directly after one (``…said \u201cstop.\u201d``)."""
+    t = (text or "").rstrip()
+    if not t:
+        return False
+    if t[-1] in _TERMINAL_PUNCT:
+        return True
+    return t[-1] in _CLOSING_QUOTES and len(t) > 1 and t[-2] in _TERMINAL_PUNCT
+
+
+def _ends_plain_word(text: str) -> bool:
+    """True when the right-stripped text ends in a bare letter or digit —
+    a word end with NO terminal mark (the missing-period shape)."""
+    t = (text or "").rstrip()
+    return bool(t) and t[-1].isalnum() and not _ends_terminal(text)
+
+
+def _ends_key_group(text: str) -> bool:
+    """True when the right-stripped text ends in a citation-key bracket
+    group (``…[W20]`` / ``…[W2, W5, W17]``) — the renderer will attach
+    (or print) a citation at the very end, so a terminal period is due."""
+    t = (text or "").rstrip()
+    if not t:
+        return False
+    m = _KEY_GROUP_RE.search(t)
+    return m is not None and m.end() == len(t)
+
+
+def _next_starts_new_sentence(text: str) -> bool:
+    """True when the text starts with an uppercase letter whose first word
+    is NOT in the exception set (``Figure 3``, ``NASA``, ``e.g.`` …) —
+    a genuine sentence start, not a proper-noun continuation."""
+    m = _FIRST_WORD_RE.match(text or "")
+    if not m:
+        return False
+    word = m.group(1)
+    if not (word and word[0].isupper()):
+        return False
+    return word.replace(".", "").lower() not in _FIRST_WORD_EXCEPTIONS
+
+
+def _strip_key_groups_plain(text: str, known: set) -> tuple:
+    """Remove every bracket group whose ENTIRE content is a list of
+    REGISTERED citation keys. Groups containing an unregistered key are
+    left in place. A single space directly before a removed group is
+    consumed; remaining double spaces collapse; trailing space drops.
+    Returns ``(new_text, groups_removed)``."""
+    if not text or not known:
+        return text, 0
+    removed = 0
+    for m in reversed(list(_KEY_GROUP_RE.finditer(text))):
+        if any(key not in known for key in _KEY_GROUP_KEY_RE.findall(m.group(0))):
+            continue
+        lo = m.start()
+        if lo > 0 and text[lo - 1] == " ":
+            lo -= 1
+        text = text[:lo] + text[m.end():]
+        removed += 1
+    if removed:
+        text = re.sub(r" {2,}", " ", text).rstrip()
+    return text, removed
+
+
+def _strip_key_groups(text: str, known: set) -> tuple:
+    """_strip_key_groups_plain with math segments (``$…$`` / ``\\(…\\)`` /
+    ``\\[…\\]``) protected: key groups inside math are never touched."""
+    if not text:
+        return text, 0
+    n = 0
+    out: list = []
+    last = 0
+    for m in _MATH_SEGMENT_RE.finditer(text):
+        seg, k = _strip_key_groups_plain(text[last:m.start()], known)
+        n += k
+        out.append(seg)
+        out.append(m.group(0))
+        last = m.end()
+    seg, k = _strip_key_groups_plain(text[last:], known)
+    n += k
+    out.append(seg)
+    return "".join(out), n
+
+
+def _collapse_repeated_clause_cites(spans: list, counts: dict) -> None:
+    """R3 — within one paragraph span sequence: a run of >=2 consecutive
+    spans with IDENTICAL non-empty citation sets is one over-fragmented
+    logical sentence; keep the citations on the LAST span of each
+    clause run and clear the earlier ones. Real sentence boundaries (a
+    span ending in a terminal mark) break runs, so distinct sentences
+    that both cite the same key keep both. Mutates in place; accumulates
+    the number of cleared spans into counts["repeated_cites_collapsed"]."""
+    i = 0
+    n = len(spans)
+    while i < n:
+        cset = set(spans[i].citations or [])
+        if not cset:
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and set(spans[j + 1].citations or []) == cset:
+            j += 1
+        if j > i:
+            seg_start = i
+            for k in range(i, j + 1):
+                if k == j or _ends_terminal(spans[k].text):
+                    if (
+                        k - seg_start + 1 >= 2
+                        and all(not _ends_terminal(spans[x].text) for x in range(seg_start, k))
+                    ):
+                        for x in range(seg_start, k):
+                            spans[x].citations = []
+                            counts["repeated_cites_collapsed"] += 1
+                    seg_start = k + 1
+        i = j + 1
+
+
+def _lint_citation_format(report: ResearchReport, registry: dict = None) -> dict:
+    """Deterministically repair the citation-format artifact classes that
+    reach the renderer — R1 redundant key groups, R2 missing terminal
+    periods, R3 repeated clause citations (see the section header comment
+    above for the full contract).
+
+    Operates per block: R1 on every prose text holder (span / list item /
+    table cell) whose citations array is non-empty; R2 + R3 on the span
+    sequence of paragraph and callout blocks. Code and equation blocks
+    are never touched; math segments are protected; every guard failure
+    is a no-op (the safe direction is "leave it"). Idempotent; never
+    raises.
+
+    Returns ``{"key_groups_removed": n, "terminal_periods_inserted": n,
+    "repeated_cites_collapsed": n}`` — surfaced in
+    quality.verification.normalized_citations.
+    """
+    counts = {
+        "key_groups_removed": 0,
+        "terminal_periods_inserted": 0,
+        "repeated_cites_collapsed": 0,
+    }
+    try:
+        known: set = set()
+        for source in report.report.sources or []:
+            if source.citation_key:
+                known.add(source.citation_key)
+        for key in (registry or {}):
+            known.add(key)
+
+        for section in report.report.sections or []:
+            for block in section.blocks or []:
+                btype = block.type
+                if btype in (BlockType.code_block, BlockType.equation, "code_block", "equation"):
+                    continue  # code / equation text: never touch
+                # R1 — strip redundant key groups (registered keys only,
+                # non-empty citations array only, math protected).
+                for holder in _iter_citation_holders(block):
+                    if not (holder.citations or []) or not (holder.text or ""):
+                        continue
+                    new, n = _strip_key_groups(holder.text, known)
+                    if n:
+                        holder.text = new
+                        counts["key_groups_removed"] += n
+                # R2 + R3 — span-sequence rules (paragraph / callout only).
+                if btype in (BlockType.paragraph, BlockType.callout, "paragraph", "callout"):
+                    spans = [s for s in (block.spans or []) if isinstance(s, Span)]
+                    for idx, span in enumerate(spans):
+                        t = (span.text or "").rstrip()
+                        if not t or _ends_terminal(t):
+                            continue  # already terminated: nothing to do
+                        key_end = _ends_key_group(t)
+                        if not (_ends_plain_word(t) or key_end):
+                            continue  # ends in ] ) $ … — ambiguous: leave it
+                        if not (span.citations or key_end):
+                            continue  # the renderer will attach nothing
+                        if idx + 1 >= len(spans):
+                            continue  # paragraph end: never insert
+                        if not _next_starts_new_sentence(spans[idx + 1].text or ""):
+                            continue  # mid-sentence / exception word: leave it
+                        span.text = t + "."
+                        counts["terminal_periods_inserted"] += 1
+                    _collapse_repeated_clause_cites(spans, counts)
+    except Exception:
+        logger.exception("citation-format lint failed; continuing unlinted")
+    return counts
+
+
+# ---------------------------------------------------------------------------
 # JSON-style unicode escapes in math (the `\\u2014` breve-bowl artifact)
 # ---------------------------------------------------------------------------
 
@@ -888,19 +1138,22 @@ def assemble_structured_report(
 
     Steps: collapse adjacent duplicate blocks, flag unresolvable citations,
     drop bare-numeric citations, map the cited registry entries to deduped
-    Source records (plan §8.1), then renumber citation arrays and rewrite
+    Source records (plan §8.1), renumber citation arrays and rewrite
     [D#]/[W#] text markers onto those final records (plan §6.3 — positions
     are 1-based into the deduped array, so they never go out of range),
     drop sub-heading blocks with no content zone, resolve bare registry keys
-    in citation-note/callout prose to source titles, and normalize citation
-    marks (collapse adjacent identical bracket groups, de-bracket registered
-    source titles, drop empty bracket pairs — counts land in
-    quality.verification.normalized_citations),    in citation-note/callout prose to source titles (the bibliography never
-    prints keys, so a prose key would dangle), promote undelimited
-    display-equation spans to equation blocks, wrap undelimited inline LaTeX
-    runs in prose spans with $...$, balance unmatched closing braces in
-    equation block bodies, normalize
-    comparison_table row widths to the header, and compute quality metrics.
+    in citation-note/callout prose to source titles (the bibliography never
+    prints keys, so a prose key would dangle), normalize citation marks
+    (collapse adjacent identical bracket groups, de-bracket registered
+    source titles, drop empty bracket pairs), lint citation format (strip
+    redundant key groups the renderer would double-print, insert missing
+    terminal periods on cited sentence-final spans, collapse repeated
+    clause citations), decode JSON-style unicode escapes in math, promote
+    undelimited display-equation spans to equation blocks, wrap undelimited
+    inline LaTeX runs in prose spans with $...$, balance unmatched closing
+    braces in equation block bodies, normalize comparison_table row widths
+    to the header, and compute quality metrics. All repair counts land in
+    quality.verification.normalized_citations / decoded_unicode_escapes.
     `evidence_json` is accepted for interface stability and reserved for
     future provenance fields.
     """
@@ -939,6 +1192,7 @@ def assemble_structured_report(
     _remap_citations_to_final_sources(report, registry)
     key_rewrite_counts = _rewrite_prose_source_keys(report, registry)
     norm_counts = _normalize_citation_marks(report)
+    lint_counts = _lint_citation_format(report, registry)
     decoded_escapes = _decode_unicode_escapes(report)
     _promote_bare_equation_spans(report)
     _wrap_undelimited_latex(report)
@@ -955,6 +1209,9 @@ def assemble_structured_report(
             "adjacent_duplicates_collapsed": norm_counts["adjacent_duplicates_collapsed"],
             "title_brackets_stripped": norm_counts["title_brackets_stripped"],
             "empty_brackets_removed": norm_counts["empty_brackets_removed"],
+            "key_groups_removed": lint_counts["key_groups_removed"],
+            "terminal_periods_inserted": lint_counts["terminal_periods_inserted"],
+            "repeated_cites_collapsed": lint_counts["repeated_cites_collapsed"],
         },
         "decoded_unicode_escapes": decoded_escapes,
     }
