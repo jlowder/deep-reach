@@ -3,26 +3,43 @@
  *
  * Citation arrays in the input hold bare numeric strings that are 1-based
  * positional indices into `report.sources` (which may be stale after the
- * source list was trimmed). Additionally, bracket markers like `[W4]` /
- * `[D6]` (matching `source.citation_key`, case-insensitive) may be embedded
- * directly in span/cell/item text.
+ * source list was trimmed). Additionally, bracket markers like `[W4]` / `[D6]`
+ * (matching `source.citation_key`, case-insensitive) may be embedded directly
+ * in span/cell/item text — either as a single key or as a comma-separated
+ * multi-key group (`[W2, W5, W17]`, a synthesis artifact of the deep-reach
+ * worker, which renumbers the citations array and leaves the key group in
+ * the prose: the class-B double group "[W2, W5, W17] [6,7,10]").
  *
  * Per span/cell/item:
  *   1. numeric ref n: 1 <= n <= sources.length -> resolves to that source;
  *      otherwise recorded as unresolvable (counted).
- *   2. markers: every /\[(W|D)\d+\]/i occurrence is looked up by
- *      citation_key; resolved if a source carries that key, otherwise
- *      counted as an unresolved marker. ALL markers are stripped from the
- *      visible text, resolved or not.
- *   3. resolved sources are unioned + deduped; the visible label is the
+ *   2. multi-key groups: stripped from the text only when EVERY key in the
+ *      group resolves to a display number (the numbers already print, so the
+ *      literal keys are redundant — worker R1 mirror). A group with any
+ *      unresolved key stays in the text as the sole trace of the reference.
+ *   3. single-key markers: every /[WD]\d+/ occurrence is looked up by
+ *      citation_key; resolved or not, ALL are stripped from the visible text
+ *      (legacy behavior, unchanged).
+ *   4. resolved sources are unioned + deduped; the visible label is the
  *      1-based array position of each source (sorted ascending).
  *
  * Unresolvable references never fail the build; they are aggregated into
  * human-readable warnings.
  */
 
-/** Bracket markers as they appear in dirty text, e.g. [W4], [D12]. */
-export const CITATION_MARKER_RE = /\[(?:W|D)\d+\]/gi;
+/**
+ * Bracket markers as they appear in dirty text: a single key (`[W4]`,
+ * `[D12]`) or a comma-separated multi-key group (`[W2, W5, W17]`),
+ * case-insensitive. Used where "any key group" matters (callout span-glue).
+ * The strip logic in `CitationResolver.resolve` distinguishes the two shapes.
+ */
+export const CITATION_MARKER_RE = /\[(?:[WD]\d+(?:\s*,\s*[WD]\d+)*)\]/gi;
+
+/** A single-key marker (the legacy shape): always stripped from text. */
+const SINGLE_KEY_MARKER_RE = /\[(?:W|D)\d+\]/gi;
+
+/** An optional leading space + a comma-separated multi-key group (2+ keys). */
+const MULTI_KEY_GROUP_RE = / ?\[[WD]\d+(?:\s*,\s*[WD]\d+)+\]/gi;
 
 /** A ref that did not resolve to a known source. */
 export interface UnresolvedRef {
@@ -43,6 +60,10 @@ export interface ResolutionResult {
   outOfRange: number;
   /** Count of bracket markers with no matching citation_key. */
   unresolvedMarkers: number;
+  /** Multi-key groups stripped because every key resolved (numbers print instead). */
+  redundantKeyGroups: number;
+  /** Keys inside a kept multi-key group that resolved to nothing. */
+  unresolvedKeptKeys: number;
   /** Structured record of each unresolvable ref (for detailed diagnostics). */
   unresolved: UnresolvedRef[];
 }
@@ -59,6 +80,8 @@ export class CitationResolver {
   private readonly idToPosition = new Map<string, number>();
   private outOfRangeCount = 0;
   private unresolvedMarkerCount = 0;
+  private redundantKeyGroupCount = 0;
+  private unresolvedKeptKeyCount = 0;
   private readonly unresolved: UnresolvedRef[] = [];
 
   private readonly total: number;
@@ -113,13 +136,42 @@ export class CitationResolver {
       unresolved.push({ ref, kind: "out-of-range", context: text.slice(0, 60) });
     }
 
-    // Bracket markers embedded in text.
+    // Bracket markers embedded in text, in two passes.
+    //
+    // Multi-key groups FIRST ([W2, W5, W17]): stripped only when EVERY key
+    // resolves to a display number — the numbers already print (unioned into
+    // sourcePositions below), so the literal keys are the redundant half of
+    // the class-B double group. A group with any unresolved key stays in the
+    // text as the sole trace of that reference (its resolved keys still
+    // contribute their numbers). The optional leading space is consumed with
+    // the group, same convention as the single-key strip.
+    let redundantKeyGroups = 0;
+    let unresolvedKeptKeys = 0;
+    let stripped = text.replace(MULTI_KEY_GROUP_RE, (m) => {
+      const keys = m
+        .slice(m.indexOf("["), m.lastIndexOf("]") + 1)
+        .slice(1, -1)
+        .split(",")
+        .map((k) => k.trim().toLowerCase());
+      const hits = keys.map((k) => this.keyToPosition.get(k));
+      for (const p of hits) if (p !== undefined) positions.add(p);
+      if (hits.every((p) => p !== undefined)) {
+        redundantKeyGroups += 1;
+        return "";
+      }
+      unresolvedKeptKeys += hits.filter((p) => p === undefined).length;
+      return m;
+    });
+
+    // Single-key markers ([W4] / [D12]): legacy behavior — every occurrence
+    // is looked up by citation_key, and ALL are stripped from the visible
+    // text, resolved or not.
     const markerHits: string[] = [];
-    text.replace(CITATION_MARKER_RE, (m) => {
+    stripped.replace(SINGLE_KEY_MARKER_RE, (m) => {
       markerHits.push(m);
       return "";
     });
-    const stripped = text.replace(/ \[(?:W|D)\d+\]/g, "").replace(CITATION_MARKER_RE, "");
+    stripped = stripped.replace(/ \[(?:W|D)\d+\]/g, "").replace(SINGLE_KEY_MARKER_RE, "");
     for (const m of markerHits) {
       const inner = m.slice(1, -1).toLowerCase();
       const pos = this.keyToPosition.get(inner);
@@ -132,6 +184,8 @@ export class CitationResolver {
 
     this.outOfRangeCount += outOfRange;
     this.unresolvedMarkerCount += unresolvedMarkers;
+    this.redundantKeyGroupCount += redundantKeyGroups;
+    this.unresolvedKeptKeyCount += unresolvedKeptKeys;
     this.unresolved.push(...unresolved);
 
     return {
@@ -139,6 +193,8 @@ export class CitationResolver {
       sourcePositions: [...positions].sort((a, b) => a - b),
       outOfRange,
       unresolvedMarkers,
+      redundantKeyGroups,
+      unresolvedKeptKeys,
       unresolved,
     };
   }
@@ -155,6 +211,17 @@ export class CitationResolver {
     if (this.unresolvedMarkerCount > 0) {
       out.push(
         `${this.unresolvedMarkerCount} citation marker(s) without a matching source citation_key (stripped)`,
+      );
+    }
+    if (this.redundantKeyGroupCount > 0) {
+      out.push(
+        `citations: removed ${this.redundantKeyGroupCount} redundant key group(s) (numbers already cited)`,
+      );
+    }
+    if (this.unresolvedKeptKeyCount > 0) {
+      out.push(
+        `${this.unresolvedKeptKeyCount} citation key(s) in a multi-key group ` +
+          `without a matching source citation_key (kept in text as the only trace)`,
       );
     }
     return out;

@@ -278,10 +278,12 @@ class TestCitationRemap:
         spans = rep.report.sections[0].blocks[0].spans
         assert [sp.citations for sp in spans] == [["1"], ["2"], []]
         assert all(c in ("1", "2") for sp in spans for c in sp.citations)
-        # Text markers rewritten onto the surviving keys; deduped keys gone.
-        assert "[D1]" in spans[0].text
-        assert "[D2" not in spans[0].text and "[D3" not in spans[0].text
-        assert "[W1]" in spans[1].text and "[W2" not in spans[1].text
+        # Key groups are redundant with the (already-remapped) citations
+        # array, so the format linter strips them; the unregistered-trace
+        # contract still holds (no [D2]/[D3] records exist to print).
+        assert spans[0].text == "Alpha claims and clearly."
+        assert spans[1].text == "Web says while agrees."
+        assert rep.quality.verification["normalized_citations"]["key_groups_removed"] == 4
 
     def test_in_range_report_unchanged(self):
         reg = {"D1": dict(DOC_A)}
@@ -292,7 +294,9 @@ class TestCitationRemap:
         rep = self._assemble(s1, registry=reg)
         assert [s.citation_key for s in rep.report.sources] == ["D1"]
         span = rep.report.sections[0].blocks[0].spans[0]
-        assert span.text == "Alpha result [D1] holds."
+        # the in-range citation survives; the redundant [D1] group (same
+        # span, same record) is stripped by the format linter
+        assert span.text == "Alpha result holds."
         assert span.citations == ["1"]
 
     def test_stale_numeric_dropped_unknown_marker_left(self):
@@ -304,7 +308,7 @@ class TestCitationRemap:
         rep = self._assemble(s1, registry=reg)
         span = rep.report.sections[0].blocks[0].spans[0]
         assert span.citations == ["1"]  # stale number dropped
-        assert "[D1]" in span.text
+        assert "[D1]" not in span.text  # registered + cited: redundant, stripped
         assert "[D9]" in span.text  # no surviving record: left untouched
         assert rep.quality.verification.get("unresolvable_citations") == ["D9"]
 
