@@ -190,6 +190,16 @@ Non-fatal issues still produce a 200 body; the count is in
   `\MATHBB`; the model casing it like a LaTeX keyword. The token is rewritten
   to the lowercase form before KaTeX and typesets; names undefined in both
   cases such as `\MATHRBUN` are left untouched and fall back as before)
+- `math: restored N backslash(es) a JSON decode consumed` (a control char
+  the JSON decode left where a LaTeX command's backslash was — the writer
+  emitted a single `\t` meaning `\times`, the parser consumed it as the tab
+  escape and the `t` left with it, so the span read `$8imes 8imes 8$` and
+  KaTeX typeset an italic `imes` — task 10b502cf. The mirror of the worker's
+  assembly pass rewrites the control char to backslash + escape letter
+  before the math gate whenever the escape letter + following text form a
+  known command with a word boundary after it; real paragraph breaks fail
+  forward untouched, and a worker-fixed report (tabs already restored at
+  assembly) counts 0 and warns nothing)
 
 ### Examples
 
