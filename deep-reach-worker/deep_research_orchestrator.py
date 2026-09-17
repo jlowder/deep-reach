@@ -141,12 +141,16 @@ def _install_tracked_run_models(
     its symbol's stack (see _run_model_stacks). Returns (module, saved)
     pairs for _restore_tracked_run_models.
     """
+    import sys
+
     saved = []
     for module, label in (
         (_decomposition_mod, "decomposer"),
         (_retriever_mod, "sufficiency/retriever"),
         (_writer_mod, "writer"),
         (_verifier_mod, "critic"),
+        # the orchestrator's own exec-summary call (module-level run_model)
+        (sys.modules[__name__], "synthesis"),
     ):
         original = module.run_model
         _run_model_stacks.setdefault(module, []).append(original)
@@ -1329,7 +1333,9 @@ def deep_research(
                     for _sid, heading, text in sections
                 )
                 try:
-                    budget.charge("exec-summary", verbose=verbose)
+                    # The call itself is tracked ("synthesis" wrapper) and
+                    # charges the budget — no direct charge here (would
+                    # double-count the same call).
                     config = get_config()
                     response = run_model(
                         instructions=(EXEC_SUMMARY_JSON_INSTRUCTIONS if output_format == "json" else EXEC_SUMMARY_INSTRUCTIONS),

@@ -81,7 +81,7 @@ def test_empty_plan_retries_once_and_completes(empty_plan_env):
     # The fallback cause is visible in the API step log (stage 1 = decompose).
     assert (
         1,
-        "model returned an empty plan — retrying with fallback",
+        "model returned an empty plan — re-prompting",
     ) in env["stages"]
 
     # The retry's 2-sq plan won (more sub-questions than the fallback's 1).
