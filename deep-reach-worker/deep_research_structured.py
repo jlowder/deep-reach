@@ -1692,6 +1692,15 @@ def _heal_malformed_math_regions(text: str) -> tuple:
     case, since a raw equation at least never breaks the PDF. Well-formed
     regions pass through byte-identical; the pass is idempotent and never
     raises. Returns (healed_text, n_regions_healed).
+
+    Splice discipline: a malformed region emits `text[i:j] + body` only —
+    the tail after the closing $ is NOT appended here, it is emitted exactly
+    once by the normal scan continuation (i = e) / the final `text[i:]`
+    append. (The earlier `+ text[e:]` double-emitted the tail, and the
+    8-pass loop re-discovered the $ delimiters copied into that tail and
+    re-healed them into ever-longer duplicate runs — task 10b502cf shipped
+    a sentence five times because of it.) A pass that changes nothing stops
+    the loop early; the 8-pass maximum bounds pathological input.
     """
     if not text or "$" not in text:
         return text, 0
@@ -1733,7 +1742,11 @@ def _heal_malformed_math_regions(text: str) -> tuple:
                 e = t + (2 if close_display else 1)
                 body = text[k:t]
                 if _region_malformed(body, display, close_display):
-                    out.append(text[i:j] + body + text[e:])
+                    # Strip both $, keep the body raw. The tail (text[e:]) is
+                    # deliberately NOT appended here: the scan resumes at e
+                    # and emits it exactly once, so a malformed region can
+                    # never duplicate what follows it.
+                    out.append(text[i:j] + body)
                     fixed += 1
                     i = e
                 else:

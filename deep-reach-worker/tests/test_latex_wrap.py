@@ -406,3 +406,50 @@ def test_full_pass_keeps_good_wraps_and_idempotent():
     _wrap_undelimited_latex(report)              # second pass: no churn
     texts2 = [s.text for b in report.report.sections[0].blocks for s in b.spans]
     assert texts2 == texts
+
+
+# ---------------------------------------------------------------------------
+# heal splice discipline (10b502cf defect A, heal half)
+# ---------------------------------------------------------------------------
+
+
+def test_heal_malformed_mid_sentence_tail_emitted_once():
+    # The old splice appended text[e:] AND let the scan re-emit text[i:] —
+    # the tail printed twice. Now: the sentence tail appears exactly once.
+    text = "The norm $\\frac{a}{b} must stay below the bound for stability."
+    out, n = _heal_malformed_math_regions(text)
+    assert n == 1
+    assert out.count("must stay below the bound") == 1
+    assert out == "The norm \\frac{a}{b} must stay below the bound for stability."
+
+
+def test_heal_copied_dollars_cannot_redouble_tail():
+    # Regression: with the double-emit in place, the 8-pass loop re-found the
+    # $ delimiters copied into the duplicated tail and re-healed them into
+    # ever-longer duplicate runs (the 5x sentence). Now idempotent.
+    text = "x $W_{$ij} rest of sentence continues here."
+    once, _ = _heal_malformed_math_regions(text)
+    twice, n2 = _heal_malformed_math_regions(once)
+    assert twice == once
+    assert n2 == 0
+    assert once.count("rest of sentence continues here.") == 1
+
+
+def test_heal_real_sec1_span_no_stutter():
+    # The real sec1 model span (task 10b502cf): one sentence with W_{ij}/
+    # J_{ab} runs. Brace-aware wrap keeps both regions balanced, so heal is a
+    # no-op and the sentence prints exactly once (it shipped 5x).
+    s = (
+        "Here W_{ij} is the synapse count between neurons i and j, "
+        "n_a is the size of type a, and the rescaled coupling J_{ab} "
+        "is a mean-field average per neuron pair."
+    )
+    wrapped, _ = _wrap_latex_in_text(s)
+    healed, n = _heal_malformed_math_regions(wrapped)
+    assert healed.count("is a mean-field average per neuron pair.") == 1
+    assert healed == (
+        "Here $W_{ij}$ is the synapse count between neurons i and j, "
+        "n_a is the size of type a, and the rescaled coupling $J_{ab}$ "
+        "is a mean-field average per neuron pair."
+    )
+    assert n == 0
