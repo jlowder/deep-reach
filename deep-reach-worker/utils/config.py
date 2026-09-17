@@ -154,7 +154,24 @@ class Config:
     writer_max_output_tokens: int = 16000
     verifier_max_output_tokens: int = 16000
     orchestrator_max_output_tokens: int = 2000
-    decomposer_max_output_tokens: int = 2000
+    # 8000 (was 2000): reasoning (thinking) tokens draw from the SAME
+    # completion budget as the JSON body. A 7-8 sub-question plan needs
+    # ~850-920 content tokens, so any thinking trace above ~1000 tokens
+    # hard-stops the generation mid-JSON at the old 2000 cap (the server
+    # cannot grammar-enforce the strict schema for this model, and the
+    # Responses API reports status="completed" even then). 8000 keeps the
+    # plan intact even with an unbounded deliberation; the decomposer's
+    # thinking budget (decomposer_thinking_budget) keeps the usual case
+    # near 2000 total tokens instead.
+    decomposer_max_output_tokens: int = 8000
+    # Thinking (reasoning) token cap for the decomposer call, sent as
+    # extra_body.thinking_budget. The local omlx/MLX server enforces it
+    # with a logits processor that force-closes the think block once the
+    # budget is spent — but ONLY when the prompt ends with an OPEN think
+    # tag (chat_template_kwargs.enable_thinking=true); with the empty
+    # think block (false) the budget is silently ignored. A budget of 0
+    # disables it and falls back to the global LLM_ENABLE_THINKING.
+    decomposer_thinking_budget: int = 1024
     # 2000 (was 1000): chatty local models spend part of the budget on
     # preamble/postamble around the small sufficiency JSON, and 1000 could
     # truncate the payload itself.
@@ -300,7 +317,8 @@ def get_config() -> Config:
             writer_max_output_tokens=int(os.getenv("WRITER_MAX_OUTPUT_TOKENS", "16000")),
             verifier_max_output_tokens=int(os.getenv("VERIFIER_MAX_OUTPUT_TOKENS", "16000")),
             orchestrator_max_output_tokens=int(os.getenv("ORCHESTRATOR_MAX_OUTPUT_TOKENS", "2000")),
-            decomposer_max_output_tokens=int(os.getenv("DECOMPOSER_MAX_OUTPUT_TOKENS", "2000")),
+            decomposer_max_output_tokens=int(os.getenv("DECOMPOSER_MAX_OUTPUT_TOKENS", "8000")),
+            decomposer_thinking_budget=int(os.getenv("DECOMPOSER_THINKING_BUDGET", "1024")),
             sufficiency_max_output_tokens=int(os.getenv("SUFFICIENCY_MAX_OUTPUT_TOKENS", "2000")),
             enable_thinking=os.getenv(
                 "LLM_ENABLE_THINKING", "false"
@@ -483,8 +501,15 @@ RETRIEVER_MAX_OUTPUT_TOKENS=2000
 WRITER_MAX_OUTPUT_TOKENS=16000
 VERIFIER_MAX_OUTPUT_TOKENS=16000
 ORCHESTRATOR_MAX_OUTPUT_TOKENS=2000
-DECOMPOSER_MAX_OUTPUT_TOKENS=2000
+DECOMPOSER_MAX_OUTPUT_TOKENS=8000
 SUFFICIENCY_MAX_OUTPUT_TOKENS=2000
+
+# ----------------------------------------
+# Decomposer thinking budget (optional)
+# ----------------------------------------
+# Caps the decomposer's reasoning trace (omlx enforces it only with
+# enable_thinking=true; 0 disables it). See DECOMPOSER_MAX_OUTPUT_TOKENS.
+DECOMPOSER_THINKING_BUDGET=1024
 
 # ----------------------------------------
 # Thinking Mode (optional)

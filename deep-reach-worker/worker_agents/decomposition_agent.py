@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -123,12 +123,16 @@ def _is_empty_plan(value: Any) -> bool:
 
 
 def _fallback_plan(
-    user_query: str, source: str = "fallback", reason: str = "unusable plan"
+    user_query: str,
+    source: str = "fallback",
+    reason: str = "unusable plan",
+    truncated: bool = False,
 ) -> Dict[str, Any]:
     """Valid single-sub-question plan used when decomposition cannot be parsed.
 
-    ``reason`` is a short human phrase (e.g. "empty plan") stored on the plan
-    so the orchestrator can name the fallback cause in its task step log.
+    ``reason`` is a short human phrase (e.g. "empty plan", "truncated plan")
+    stored on the plan so the orchestrator can name the fallback cause in its
+    task step log. ``truncated`` marks the cut-off-generation case.
     """
     return {
         "is_simple": True,
@@ -143,6 +147,7 @@ def _fallback_plan(
         ],
         "source": source,
         "fallback_reason": reason,
+        "fallback_truncated": bool(truncated),
     }
 
 
@@ -156,6 +161,118 @@ def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
     """
     value = extract_json_payload(text)
     return value if isinstance(value, dict) else None
+
+
+def _scan_json_containers(text: str) -> tuple:
+    """One-pass, string/escape-aware bracket scan of ``text``.
+
+    Returns ``(objects, stack_at_end)``: ``objects`` is a list of
+    (start, end) spans of every balanced ``{...}`` object in document
+    order (start = the opening brace, end = one past the matching one);
+    ``stack_at_end`` is the list of container kinds ('{' or '[') still
+    open at the end of the text. A close with no matching open is
+    ignored, so prose with stray braces degrades gracefully. Never
+    raises; returns ([], []) on empty input. This is the truncation
+    detector: a JSON document that opened containers it never closed was
+    cut off mid-generation (the server reports status="completed" even
+    when max_output_tokens hard-stops the stream, so it must be derived).
+    """
+    stack: List[Tuple[str, int]] = []
+    objects: List[Tuple[int, int]] = []
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch in "{[":
+            stack.append((ch, i))
+        elif ch in "}]":
+            if stack:
+                kind, start = stack.pop()
+                if kind == "{" and ch == "}":
+                    objects.append((start, i + 1))
+    return objects, [kind for kind, _ in stack]
+
+
+def _is_truncated_json(text: str) -> bool:
+    """True when ``text`` looks like a JSON document cut off mid-stream:
+    it opened containers (braces or brackets, outside string literals)
+    that are never closed by the end. Balanced-bracket prose is NOT
+    truncated. Never raises."""
+    try:
+        t = (text or "").strip()
+        if not t:
+            return False
+        if t.startswith("```"):
+            t = t.split("\n", 1)[-1]  # drop the fence line ("```"/"```json")
+        _, stack = _scan_json_containers(t)
+        return bool(stack)
+    except Exception:
+        return False
+
+
+def _salvage_truncated_plan(text: str) -> Optional[str]:
+    """Deterministically repair a truncated plan JSON (no LLM): cut the
+    text at the last COMPLETE sub-question object, drop any dangling
+    comma, then close the still-open containers in stack order so the
+    document parses. Returns the repaired JSON text, or None when no
+    complete sub-question object survives (e.g. truncated inside sq1) or
+    the repair cannot be re-parsed. Never raises."""
+    try:
+        t = (text or "").strip()
+        if t.startswith("```"):
+            t = t.split("\n", 1)[-1]
+        objects, _ = _scan_json_containers(t)
+        best_end: Optional[int] = None
+        for start, end in objects:
+            try:
+                val = json.loads(t[start:end])
+            except ValueError:
+                continue
+            q = val.get("question") if isinstance(val, dict) else None
+            if isinstance(q, str) and q.strip():
+                # Spans are properly nested in a well-formed prefix, so
+                # the greatest end is the last complete sub-question.
+                best_end = max(best_end or 0, end)
+        if best_end is None:
+            return None
+        prefix = t[:best_end].rstrip()
+        while prefix.endswith(","):
+            prefix = prefix[:-1].rstrip()
+        _, stack = _scan_json_containers(prefix)
+        repaired = prefix + "".join("]" if k == "[" else "}" for k in reversed(stack))
+        json.loads(repaired)  # must re-parse or it is not a repair
+        return repaired
+    except Exception:
+        return None
+
+
+def _response_hit_output_cap(response: Any) -> bool:
+    """True when the completion consumed the full max_output_tokens
+    budget — the hard-stop signature. Defensive: ``usage`` or the echoed
+    cap may be absent (other servers, or an SDK that omits the field).
+    The server's per-item finish_reason is None even on a cap hit, so
+    this check (plus the bracket scan) is the truncation evidence."""
+    try:
+        capped = getattr(response, "capped", None)
+        if capped is not None:
+            return bool(capped)
+        usage = getattr(response, "usage", None)
+        out = getattr(usage, "output_tokens", None)
+        cap = getattr(response, "max_output_tokens", None)
+        if out is None or cap is None:
+            return False
+        return int(out) >= int(cap)
+    except Exception:
+        return False
 
 
 def _ensure_ids(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -172,10 +289,19 @@ def _parse_plan(response: Any, user_query: str) -> Dict[str, Any]:
 
     An *empty* plan (``sub_questions`` missing/null/[]) fails validation via
     ``ResearchPlan.sub_questions``' min_length=1, so it falls through to the
-    single-sub-question fallback plan with ``source='fallback'`` — which makes
-    the orchestrator's decomposition retry fire.
+    single-sub-question fallback plan with ``source='fallback'`` — which
+    makes the orchestrator's decomposition retry fire.
+
+    A *truncated* plan (containers never re-balance, or the call consumed
+    its full token budget) is repaired deterministically instead: the text
+    is cut at the last complete sub-question, the still-open containers
+    are closed, and the partial plan is returned with ``source='salvaged'``.
+    Only when no complete sub-question survives does it fall through to
+    the fallback (the orchestrator then re-prompts once with the no-prose
+    variant before giving up).
     """
     reason = ""  # why the final fallback is needed (set when a path is empty)
+    raw_text = getattr(response, "output_text", None) or ""
     # 1) Structured output from responses.parse().
     try:
         parsed = getattr(response, "output_parsed", None)
@@ -193,7 +319,6 @@ def _parse_plan(response: Any, user_query: str) -> Dict[str, Any]:
 
     # 2) JSON object embedded in the raw text.
     try:
-        raw_text = getattr(response, "output_text", None) or ""
         candidate = _extract_json_object(raw_text)
         if candidate is not None:
             data = _validated_plan_from_candidate(candidate)
@@ -206,13 +331,39 @@ def _parse_plan(response: Any, user_query: str) -> Dict[str, Any]:
             + (" (empty sub_questions)" if reason else "")
         )
 
+    # 2.5) Truncated generation: salvage the complete sub-questions.
+    # The bracket scan is the primary signal (it works on any text);
+    # the token-cap check covers the rare cap hit that still left the
+    # brackets balanced. A salvage replaces the fallback only when the
+    # repaired document validates — a partial plan is better than the
+    # single-query fallback and avoids spending the re-prompt.
+    truncated = _is_truncated_json(raw_text) or _response_hit_output_cap(response)
+    if truncated and _is_truncated_json(raw_text):
+        repaired = _salvage_truncated_plan(raw_text)
+        if repaired is not None:
+            try:
+                data = _validated_plan_from_candidate(json.loads(repaired))
+                n = len(data["sub_questions"])
+                data["source"] = "salvaged"
+                data["salvage_sub_questions"] = n
+                data["salvage_capped"] = _response_hit_output_cap(response)
+                logger.warning(
+                    f"Decomposer plan was truncated; salvaged {n} complete "
+                    f"sub-question(s) without a re-prompt"
+                )
+                return data
+            except Exception as exc:
+                logger.warning(f"Decomposer salvage failed validation: {exc}")
+    if truncated and not reason:
+        reason = "truncated plan"
+
     # 3) Final fallback: always a valid plan.
     reason = reason or "unusable plan"
     logger.warning(
         f"Decomposer produced no usable plan ({reason}); "
         "using single-sub-question fallback"
     )
-    return _fallback_plan(user_query, reason=reason)
+    return _fallback_plan(user_query, reason=reason, truncated=truncated)
 
 
 def _normalize_plan_candidate(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -298,6 +449,7 @@ def _plain_text_plan_json(
             input_data=input_data,
             reasoning_effort=config.get_reasoning_effort("decomposer"),
             max_output_tokens=config.get_max_output_tokens("decomposer"),
+            thinking_budget=getattr(config, "decomposer_thinking_budget", 0) or None,
             agent_name="decomposer",
             endpoint=endpoint,
             api_key=api_key,
@@ -314,6 +466,7 @@ def decompose_query(
     verbose: bool = False,
     endpoint: Optional[str] = None,
     api_key: Optional[str] = None,
+    reprompt: bool = False,
 ) -> Dict[str, Any]:
     """
     Decompose a user query into a research plan with ONE structured LLM call.
@@ -325,12 +478,18 @@ def decompose_query(
         verbose: Print a one-line summary of the result.
         endpoint: Optional custom endpoint URL.
         api_key: Optional custom API key.
+        reprompt: True on the retry attempt after an unusable plan —
+            appends the no-prose line to the input. The first-shot prompt
+            stays byte-identical (a leading instruction measurably
+            degrades strict-JSON compliance; a trailing one is the least
+            disruptive place to insist on it).
 
     Returns:
         Plan dict: {"is_simple": bool, "sub_questions": [
             {"id", "question", "angle", "expected_sources", "priority"}],
-            "source": "structured" | "json-fallback" | "fallback"}.
-        Never raises: every failure path returns a valid fallback plan.
+            "source": "structured" | "json-fallback" | "salvaged" |
+            "fallback"}.
+        Never raises: every failure path returns a valid plan.
     """
     query = (user_query or "").strip()
     if not query:
@@ -347,6 +506,11 @@ def decompose_query(
         f"User query: {query}\n\n"
         f"Indexed document catalog (the only local documents available):\n{doc_lines}"
     )
+    if reprompt:
+        input_data += (
+            "\n\nRespond with the JSON object only. Do not deliberate, "
+            "explain, or write any text before or after the JSON."
+        )
 
     config = get_config()
     plan: Optional[Dict[str, Any]] = None
@@ -357,6 +521,7 @@ def decompose_query(
             text_format=ResearchPlan,
             reasoning_effort=config.get_reasoning_effort("decomposer"),
             max_output_tokens=config.get_max_output_tokens("decomposer"),
+            thinking_budget=getattr(config, "decomposer_thinking_budget", 0) or None,
             agent_name="decomposer",
             endpoint=endpoint,
             api_key=api_key,

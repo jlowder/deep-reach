@@ -388,7 +388,10 @@ class TestEmptyPlanRegression:
         )
         plan = decompose_query(self.QUERY, [])
         assert plan["source"] == "fallback"
-        assert plan["fallback_reason"] == "unusable plan"
+        # an unbalanced container (the stray "{") is now classified as a
+        # truncated plan, distinct from the balanced-but-empty/unusable cases
+        assert plan["fallback_reason"] == "truncated plan"
+        assert plan["fallback_truncated"] is True
 
     def test_valid_single_sq_structured_passes_through(self, monkeypatch):
         # min_length=1 must not over-reject: a one-sub-question plan is a

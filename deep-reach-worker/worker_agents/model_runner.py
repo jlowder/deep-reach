@@ -1,6 +1,7 @@
 import os
 import logging
 import re
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -110,6 +111,78 @@ def _sanitize_output_snippet(
     return _SECRET_RE.sub("[REDACTED]", f"{head} …[{elided} chars elided]… {tail}")
 
 
+def summarize_usage(
+    response: Any,
+    *,
+    model: Optional[str] = None,
+    max_output_tokens: Optional[int] = None,
+    elapsed_ms: Optional[float] = None,
+    stage: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Compact per-call usage summary for observability (stats.llm_call_log).
+
+    Defensive mapping of the server's usage object (omlx's Responses usage:
+    ``input_tokens`` / ``output_tokens`` / ``output_tokens_details.
+    reasoning_tokens``; missing fields → null) — other servers or SDK
+    versions that omit a field degrade to nulls instead of raising.
+    Derives ``finish_reason``: the server's per-item finish_reason when it
+    is set (omlx leaves it None), otherwise ``"length"`` when the
+    completion consumed the full max_output_tokens budget — the only
+    reliable truncation signal on a server that reports status="completed"
+    for a cap-hit stream. Also sets the ``response.capped`` marker the
+    decomposer's truncation check reads. Never raises; returns an entry of
+    nulls when nothing is present.
+    """
+    entry: Dict[str, Any] = {
+        "stage": stage,
+        "model": model if isinstance(model, str) else None,
+        "tokens_in": None,
+        "tokens_out": None,
+        "reasoning_out": None,
+        "finish_reason": None,
+        "ms": round(float(elapsed_ms)) if elapsed_ms is not None else None,
+        "capped": None,
+    }
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            entry["tokens_in"] = getattr(usage, "input_tokens", None)
+            entry["tokens_out"] = getattr(usage, "output_tokens", None)
+            details = getattr(usage, "output_tokens_details", None)
+            if details is not None:
+                entry["reasoning_out"] = getattr(details, "reasoning_tokens", None)
+        if entry["model"] is None:
+            resp_model = getattr(response, "model", None)
+            entry["model"] = resp_model if isinstance(resp_model, str) else None
+        if max_output_tokens is None:
+            max_output_tokens = getattr(response, "max_output_tokens", None)
+        out = entry["tokens_out"]
+        try:
+            entry["capped"] = bool(
+                out is not None
+                and max_output_tokens is not None
+                and int(out) >= int(max_output_tokens)
+            )
+        except (TypeError, ValueError):
+            entry["capped"] = None
+        finish = None
+        for item in (getattr(response, "output", None) or []):
+            fr = getattr(item, "finish_reason", None)
+            if fr:
+                finish = fr
+                break
+        if finish is None and entry["capped"]:
+            finish = "length"
+        entry["finish_reason"] = finish
+        try:
+            response.capped = bool(entry["capped"])
+        except Exception:
+            pass  # read-only response objects: the check re-derives
+    except Exception:
+        pass  # observability must never fail the call
+    return entry
+
+
 def _normalize_endpoint_url(endpoint: str) -> str:
     """
     Normalize an endpoint URL to ensure consistent formatting.
@@ -186,6 +259,7 @@ def run_model(
     endpoint: Optional[str] = None,
     api_key: Optional[str] = None,
     agent_name: Optional[str] = None,
+    thinking_budget: Optional[int] = None,
 ):
     """
     Run an LLM model with the given parameters.
@@ -203,6 +277,16 @@ def run_model(
         endpoint: Custom endpoint URL (overrides default)
         api_key: Custom API key (overrides default)
         agent_name: Agent name to use configuration from (e.g., "retriever", "writer")
+        thinking_budget: Optional per-call cap on REASONING (thinking) tokens,
+            sent as extra_body.thinking_budget. The local omlx/MLX server
+            enforces it with a logits processor that force-closes the think
+            block once the budget is spent — but ONLY when the prompt ends
+            with an OPEN think tag, so this parameter forces
+            chat_template_kwargs.enable_thinking=True for THIS call (a
+            per-call override of the global LLM_ENABLE_THINKING; with the
+            empty think block the server would silently ignore the budget).
+            Ignored by servers that don't know the field (extra_body is
+            additive). None/0 = no per-call budget.
 
     Returns:
         The model response
@@ -305,6 +389,12 @@ def run_model(
     extra_body["chat_template_kwargs"] = chat_template_kwargs
     request["extra_body"] = extra_body
     logger.debug(f"Added extra_body.chat_template_kwargs.enable_thinking: {config.enable_thinking}")
+    if thinking_budget:
+        # Per-call thinking cap: force the OPEN think tag (the server only
+        # enforces a budget when the prompt ends with one) plus the budget.
+        chat_template_kwargs["enable_thinking"] = True
+        extra_body["thinking_budget"] = int(thinking_budget)
+        logger.debug(f"Added extra_body.thinking_budget: {int(thinking_budget)} (enable_thinking forced True)")
 
     logger.debug("=" * 80)
     logger.debug("FINAL REQUEST DICT (about to send to API):")
@@ -335,6 +425,7 @@ def run_model(
         logger.debug("Calling client.responses.create()")
 
     global last_llm_error
+    _call_start = time.perf_counter()
     try:
         response = client.responses.create(**request)
     except Exception as exc:
@@ -359,6 +450,19 @@ def run_model(
             f"(model={request.get('model')}); normalizing to empty output"
         )
         response.output = []
+
+    # Per-call usage summary + budget-exhaustion (capped) marker — feeds
+    # stats.llm_call_log and the decomposer's truncation check. Defensive:
+    # never raises.
+    try:
+        summarize_usage(
+            response,
+            model=str(request.get("model")),
+            max_output_tokens=request.get("max_output_tokens"),
+            elapsed_ms=(time.perf_counter() - _call_start) * 1000.0,
+        )
+    except Exception:
+        pass
 
     if text_format is not None:
         # Tolerant client-side parse: recover the JSON payload from whatever

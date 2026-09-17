@@ -499,7 +499,7 @@ def test_decompose_fallback_retries_once_and_keeps_bigger_plan(monkeypatch, caps
     out = capsys.readouterr().out
 
     assert len(calls) == 2  # exactly one retry, no more
-    assert "retrying once" in out
+    assert "re-prompting" in out
     plan = result["state"]["plan"]
     assert plan["source"] == "json-fallback"  # the retry's plan was kept
     assert len(plan["sub_questions"]) == 2
