@@ -1397,7 +1397,10 @@ def _math_run_start(text: str, i: int, protected) -> int:
     """Return the true start of a math run at/just before index i, or -1.
 
     Strong start signals (and only these):
-      S1: a backslash command (\\lambda, \\psi, ...)
+      S1: a backslash command (\\lambda, \\psi, ...) — absorbing ONE
+          preceding base: an opening group brace ({\\lambda_i}) or a bare
+          DIGIT across one space (8 \\times -> base 8; a multi-digit number
+          like 28 is NOT absorbed — only a standalone single digit)
       S2: a braced super/subscript (^{ ... _{) — absorbing ONE preceding
           alphanumeric base char (2^{N} -> base 2)
       S3: a ket/bra unit: ``|`` opening a ``|…\\rangle`` ket, or ``\\langle``
@@ -1414,6 +1417,14 @@ def _math_run_start(text: str, i: int, protected) -> int:
         s = i
         if s > 0 and text[s - 1] == "{" and not protected[s - 1]:
             s -= 1  # absorb an opening group brace: {\lambda_i}
+        elif (
+            s >= 2
+            and not protected[s - 2]
+            and text[s - 1] in _LATEX_SPACES
+            and text[s - 2].isdigit()
+            and (s < 3 or not text[s - 3].isalnum())
+        ):
+            s -= 2  # absorb a bare digit base across one space: 8 \times
         return s
     # S2: braced super/subscript with a base
     if c in "^_" and i + 1 < n and text[i + 1] == "{":
@@ -1451,9 +1462,17 @@ def _math_run_extent(text: str, start: int, protected) -> int:
     space when the next token looks mathematical. Stops at a run of >=2
     consecutive lowercase letters (prose words), >=3 uppercase, or a
     non-math character. A single lowercase letter continues (p_n, e^{i...}).
+
+    Brace-aware: the prose-word stops apply only at brace depth 0. Inside
+    a balanced {...} group a short word is a command ARGUMENT, not prose
+    (\\mathrm{nm} stays one run; the run extends THROUGH balanced braces
+    and only a depth-0 word/period ends it), so `8\\times 8\\,\\mathrm{nm}
+    isotropic` wraps as `$8\\times 8\\,\\mathrm{nm}$ isotropic` instead of
+    splitting at the argument.
     """
     j = start
     n = len(text)
+    depth = 0  # unescaped brace depth; prose-word stops apply at depth 0
     # Unit mode: the run began with a ket/bra opener — it then extends only
     # until the unit's closing delimiter (\rangle for kets, | for bras).
     mode = None
@@ -1503,13 +1522,23 @@ def _math_run_extent(text: str, start: int, protected) -> int:
             continue
         if c.isalpha():
             lr = _letter_run(text, j)
-            if lr and c.islower() and lr >= 2:
-                break  # prose word
-            if lr and c.isupper() and lr >= 3:
-                break  # prose acronym
-            j += lr
+            if depth == 0:
+                if lr and c.islower() and lr >= 2:
+                    break  # prose word (only outside braces)
+                if lr and c.isupper() and lr >= 3:
+                    break  # prose acronym (only outside braces)
+            j += lr  # inside braces the word is a command argument
             continue
-        if c in "{}^_0123456789=+-*/.~:;,()|":
+        if c == "{":
+            depth += 1
+            j += 1
+            continue
+        if c == "}":
+            if depth:
+                depth -= 1  # an unbalanced closer can't go negative
+            j += 1
+            continue
+        if c in "^_0123456789=+-*/.~:;,()|":
             j += 1
             continue
         if c in _LATEX_SPACES:
@@ -1600,8 +1629,9 @@ def _wrap_latex_in_text(text: str) -> tuple:
                 i += 1
                 continue
             if s < i:
-                # absorbed base/brace/ket char was already appended
-                out.pop()
+                # absorbed base/brace chars were already appended
+                for _ in range(i - s):
+                    out.pop()
             out.append(head + "$" + run + "$" + tail)
             wrapped += 1
             i = max(e, i + 1)

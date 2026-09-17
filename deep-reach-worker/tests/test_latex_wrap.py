@@ -142,6 +142,45 @@ def test_single_lowercase_base_arg_stays_math():
     assert "$x^2/|x|$ is bounded" in new
 
 
+def test_braced_argument_word_does_not_split_run():
+    # Real task 10b502cf sec2 span: the 2-letter word INSIDE \mathrm{...}
+    # used to terminate the run at the `{`, stranding a $ mid-brace. The
+    # bare digit base is absorbed across its space (KaTeX treats the inner
+    # space as a math space); the span ends after the closing brace.
+    new, k = _wrap_latex_in_text(
+        r"volume at 8 \times 8 \times 8\,\mathrm{nm} isotropic resolution."
+    )
+    assert k == 1
+    assert new == r"volume at $8 \times 8 \times 8\,\mathrm{nm}$ isotropic resolution."
+
+
+def test_braced_run_followed_by_prose_ends_after_brace():
+    new, k = _wrap_latex_in_text(r"x = y \mathrm{nm} isotropic words follow.")
+    assert k == 1
+    assert new == r"x = y $\mathrm{nm}$ isotropic words follow."
+
+
+def test_multidigit_number_base_not_absorbed():
+    # Only a standalone single digit is a base: `28 \times 9` starts at the
+    # command, not at the 28 (else prose like "room 28 \psi" would swallow 8).
+    new, k = _wrap_latex_in_text(r"values 28 \times 9 came from the scan")
+    assert k == 1
+    assert new == r"values 28 $\times 9$ came from the scan"
+
+
+def test_escaped_brace_does_not_change_depth():
+    new, k = _wrap_latex_in_text(r"literal \{ word after")
+    # \{ is escaped content (no group); the 2-letter word still stops any
+    # run, and no run starts here at all.
+    assert new == r"literal \{ word after" and k == 0
+
+
+def test_nested_braces_run_through_multiple_levels():
+    new, k = _wrap_latex_in_text(r"p(x) = f_{i{jk}} and the prose resumes here")
+    assert k == 1
+    assert new == r"p(x) = $f_{i{jk}}$ and the prose resumes here"
+
+
 def test_idempotent_second_pass_is_noop():
     t = "a 2^{N}-dimensional space with S_A = S_B entropy"
     once, k1 = _wrap_latex_in_text(t)
