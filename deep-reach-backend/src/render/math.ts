@@ -71,6 +71,116 @@ export function katexStylesheet(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Late-backslash restore (mirror of the worker's _restore_late_backslash,
+// task 10b502cf defect B)
+// ---------------------------------------------------------------------------
+
+// Control chars a JSON decode can produce where the model meant a LaTeX
+// command: the model writes a SINGLE backslash in its JSON (\\times), the
+// parser consumes it as the escape, and the letter the escape names (t) is
+// gone with it — the decoded text is <TAB>imes. Map each C0 escape to the
+// letter it consumes.
+const CONTROL_ESCAPE_LETTER: Record<string, string> = {
+  "\t": "t",
+  "\n": "n",
+  "\r": "r",
+  "\f": "f",
+  "\b": "b",
+  "\v": "v",
+};
+
+// Known LaTeX commands whose first letter is a JSON-escape letter (the full
+// family is listed for documentation; only entries whose first letter is a
+// control-escape letter can ever match — the JSON escape letters are
+// lowercase, so Re/Im are unreachable). Same set as the worker.
+const LATEX_COMMAND_TAILS = [
+  "times", "text", "theta", "tau", "tan", "nu", "nabla", "neq", "nint",
+  "not", "rho", "rangle", "right", "rceil", "rfloor", "frac", "forall",
+  "leq", "geq", "approx", "equiv", "pm", "cdot", "sqrt", "sum", "int",
+  "oint", "infty", "ldots", "dots", "alpha", "beta", "gamma", "delta",
+  "epsilon", "zeta", "eta", "iota", "kappa", "lambda", "mu", "xi", "pi",
+  "sigma", "phi", "chi", "psi", "omega", "partial", "exists", "cup", "cap",
+  "vee", "wedge", "mapsto", "sim", "propto", "le", "ge", "mid", "ang",
+  "deg", "hbar", "ell", "Re", "Im", "sin", "cos", "log", "exp", "min",
+  "max", "lim", "arg", "mod", "bar",
+];
+
+// Escape letter -> command tails that follow the control char (the command
+// minus the letter the escape consumed), longest first so a specific
+// command (nabla) wins over a prefix (nu).
+const ESCAPE_TAILS: Record<string, string[]> = {};
+const ESCAPE_LETTERS = new Set(Object.values(CONTROL_ESCAPE_LETTER));
+for (const cmd of LATEX_COMMAND_TAILS) {
+  const first = cmd[0];
+  if (ESCAPE_LETTERS.has(first) && first === first.toLowerCase()) {
+    (ESCAPE_TAILS[first] ??= []).push(cmd.slice(1));
+  }
+}
+for (const letter of Object.keys(ESCAPE_TAILS)) {
+  ESCAPE_TAILS[letter].sort((a, b) => b.length - a.length);
+}
+
+/**
+ * Restore LaTeX commands whose backslash a JSON decode consumed (worker
+ * `_restore_late_backslash` mirror). Where the model meant `\\times` in its
+ * JSON it sometimes wrote a single `\\t`; the parser turned that into a TAB
+ * and the `t` left with it — the decoded text reads `<TAB>imes` (the PDF of
+ * task 10b502cf typeset an italic `imes`: KaTeX saw the tab as a math space
+ * and the identifier after it). At each control char, if the escape letter
+ * + the following text form a known command and the char after the tail is
+ * a non-word char (or end) — the control char becomes backslash + escape
+ * letter (`<TAB>imes ` -> `\\times `). Fails forward (a real paragraph
+ * break before `use` stays byte-identical); idempotent; never throws.
+ *
+ * This is the paperbot's defense for reports produced by a worker that
+ * predates the assembly pass (e.g. the delivered 10b502cf report): the
+ * count feeds the aggregate warning so a re-rendered legacy report surfaces
+ * what it repaired.
+ */
+export function restoreLateBackslash(
+  text: string,
+): { text: string; restored: number } {
+  if (text === "" || !/[\t\n\r\f\b\v]/.test(text)) return { text, restored: 0 };
+  let restored = 0;
+  let out = "";
+  let last = 0;
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    const letter = CONTROL_ESCAPE_LETTER[text.charAt(i)];
+    if (letter === undefined) {
+      i += 1;
+      continue;
+    }
+    let matched = false;
+    for (const tail of ESCAPE_TAILS[letter] ?? []) {
+      const at = i + 1;
+      if (at + tail.length > n) continue;
+      if (text.slice(at, at + tail.length) !== tail) continue;
+      const after = text.charAt(at + tail.length);
+      if (after !== "" && /[A-Za-z0-9]/.test(after)) continue; // mid-word
+      out += text.slice(last, at - 1) + "\\" + letter;
+      last = at;
+      i = at + tail.length;
+      restored += 1;
+      matched = true;
+      break;
+    }
+    if (!matched) i += 1;
+  }
+  out += text.slice(last);
+  return { text: out, restored };
+}
+
+/**
+ * Per-event warning marker pushed by the restore call sites; the block
+ * renderer aggregates the per-block count into a single
+ * `math: restored N backslash(es) a JSON decode consumed` entry (one-entry-
+ * per-event-type, like the missing-period marker).
+ */
+export const LATE_BACKSLASH_RESTORED_MARK = "math: restored a backslash a JSON decode consumed";
+
+// ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
 

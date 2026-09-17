@@ -14,7 +14,15 @@ import {
   type TableCell,
 } from "../document.js";
 import { citationSup, CITATION_MARKER_RE } from "../citations.js";
-import { renderMath, splitMath, stripMathDelimiters, _stripDollarDelimiters, balanceBraces } from "./math.js";
+import {
+  renderMath,
+  splitMath,
+  stripMathDelimiters,
+  _stripDollarDelimiters,
+  balanceBraces,
+  restoreLateBackslash,
+  LATE_BACKSLASH_RESTORED_MARK,
+} from "./math.js";
 
 /** Escape a string for safe use in an HTML text node. */
 export function escapeHtml(s: string): string {
@@ -44,8 +52,26 @@ function isSafeUrl(url: string): boolean {
 /**
  * Flush renderer-side warnings (math fallbacks, skipped figures, ...).
  * Empty entries are aggregation placeholders (see aggregatePeriodWarnings).
+ * Per-event late-backslash restore markers are aggregated here — at the
+ * single flush point, so every block renderer gets the one-entry
+ * `math: restored N backslash(es) a JSON decode consumed` form — into one
+ * entry in the same one-entry-per-event-type pattern.
  */
 function reportWarnings(warnings: readonly string[], opts: BlockRenderOptions): void {
+  const restoredCount = warnings.filter((w) => w === LATE_BACKSLASH_RESTORED_MARK).length;
+  if (restoredCount > 0) {
+    let first = true;
+    for (const w of warnings) {
+      if (w === "") continue;
+      if (w === LATE_BACKSLASH_RESTORED_MARK) {
+        if (first) opts.onWarning?.(`math: restored ${restoredCount} backslash(es) a JSON decode consumed`);
+        first = false;
+        continue;
+      }
+      opts.onWarning?.(w);
+    }
+    return;
+  }
   for (const w of warnings) if (w !== "") opts.onWarning?.(w);
 }
 
@@ -138,24 +164,36 @@ function aggregatePeriodWarnings(warnings: string[]): void {
 function renderCitedText(text: string, positions: readonly number[], warnings: string[]): string {
   const raw = text.trim();
   const sup = citationSup(positions);
-  const segments = splitMath(raw);
+
+  // Late-backslash restore FIRST (10b502cf defect B mirror): a control char
+  // that a JSON decode left where a LaTeX command's backslash was becomes
+  // backslash + escape letter before the math gate ever runs, so a corrupted
+  // $-region (`$8<TAB>imes 8<TAB>imes 8$`) is repaired instead of typeset
+  // with an italic `imes`. Idempotent — an already-restored (worker-fixed)
+  // report counts 0 and warns nothing.
+  const restoredSpan = restoreLateBackslash(raw);
+  const body = restoredSpan.text;
+  const segments = splitMath(body);
+  if (restoredSpan.restored > 0) {
+    for (let k = 0; k < restoredSpan.restored; k += 1) warnings.push(LATE_BACKSLASH_RESTORED_MARK);
+  }
 
   // Empty / zero-width input (e.g. a cell whose text normalized to ""):
   // splitMath yields zero segmentS, and the trailing-segment index below
   // would read `undefined.kind`. Render empty: an empty cell stays an
   // empty cell.
-  if (raw === "" || segments.length === 0) return "";
+  if (body === "" || segments.length === 0) return "";
 
   if (segments.length === 1 && segments[0].kind === "text") {
     // No math markers: whole-text punct rule (unchanged legacy behavior).
-    const m = raw.match(/^(.*?)([.!?]+)$/s);
+    const m = body.match(/^(.*?)([.!?]+)$/s);
     if (m) {
       const base = m[1].replace(/\s+$/, "");
       const punct = m[2];
       if (sup) return (base ? escapeHtml(base) + " " : " ") + sup + escapeHtml(punct);
       return escapeHtml(base + punct);
     }
-    return escapeHtml(raw) + sup;
+    return escapeHtml(body) + sup;
   }
 
   // Math present: render segment by segment; text segments are escaped.
@@ -506,12 +544,16 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
       // else renders as a plain code block, unchanged.
       if (block.language.toLowerCase() === "latex" || block.language.toLowerCase() === "tex") {
         const warnings: string[] = [];
-        // The body is typeset verbatim (display math): balance a stray
-        // unmatched closing brace before the well-formedness gate so the
-        // classic LLM typo (task 427f039f) still typesets; a body that is
-        // still malformed (e.g. an unmatched opener) falls back to the
-        // visible literal with a surfaced warning.
-        const tex = balanceBraces(_stripDollarDelimiters(block.text.trim()));
+        // The body is typeset verbatim (display math): restore a JSON-eaten
+        // backslash, then balance a stray unmatched closing brace before the
+        // well-formedness gate so the classic LLM typo (task 427f039f) still
+        // typesets; a body that is still malformed (e.g. an unmatched opener)
+        // falls back to the visible literal with a surfaced warning.
+        const restored = restoreLateBackslash(block.text.trim());
+        if (restored.restored > 0) {
+          for (let k = 0; k < restored.restored; k += 1) warnings.push(LATE_BACKSLASH_RESTORED_MARK);
+        }
+        const tex = balanceBraces(_stripDollarDelimiters(restored.text));
         const html = `<div class="equation">${renderMath(tex, true, warnings, "equation")}</div>`;
         reportWarnings(warnings, opts);
         return html;
@@ -537,7 +579,16 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
     }
 
     case "equation": {
-      const t = block.text.trim();
+      // Late-backslash restore FIRST (10b502cf defect B mirror): the tab a
+      // JSON decode left where `\frac`'s backslash was becomes `\f` + `rac`
+      // before delimiter stripping / balance / gate, so a corrupted display
+      // equation typesets instead of degrading to literal raw LaTeX.
+      const r = restoreLateBackslash(block.text);
+      const warnings: string[] = [];
+      if (r.restored > 0) {
+        for (let k = 0; k < r.restored; k += 1) warnings.push(LATE_BACKSLASH_RESTORED_MARK);
+      }
+      const t = r.text.trim();
       const tex = stripMathDelimiters(t);
       // Redundant inline `$` delimiters inside a display equation (a model
       // artifact) are stripped: `F($\psi$) = $\operatorname{Tr}$$` ->
@@ -555,12 +606,12 @@ export function renderBlock(block: Block, opts: BlockRenderOptions = {}): string
         tex !== t ||
         stripped !== tex
       ) {
-        const warnings: string[] = [];
         const html = `<div class="equation">${renderMath(balanced, true, warnings, "equation")}</div>`;
         reportWarnings(warnings, opts);
         return html;
       }
-      return `<div class="equation">${escapeHtml(block.text)}</div>`;
+      reportWarnings(warnings, opts);
+      return `<div class="equation">${escapeHtml(r.text)}</div>`;
     }
 
     case "page_break": {

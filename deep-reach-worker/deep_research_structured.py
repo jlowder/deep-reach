@@ -1121,6 +1121,172 @@ def _decode_unicode_escapes(report: ResearchReport) -> int:
     return counts["decoded_unicode_escapes"]
 
 
+# ---------------------------------------------------------------------------
+# Late-backslash restore (JSON-escape artifact, defect B of task 10b502cf)
+# ---------------------------------------------------------------------------
+
+# Control chars a JSON decode can produce where the model meant a LaTeX
+# command: the model writes a SINGLE backslash in its JSON (\times), the
+# parser consumes it as the escape, and the letter the escape names (t) is
+# gone with it — the decoded text is <TAB>imes. Mapping each C0 escape to
+# the letter it consumes.
+_CONTROL_ESCAPE_LETTER = {
+    "\t": "t",
+    "\n": "n",
+    "\r": "r",
+    "\f": "f",
+    "\b": "b",
+    "\v": "v",
+}
+
+# Known LaTeX commands whose first letter is a JSON-escape letter (the full
+# family is listed for documentation; only entries whose first letter is a
+# control-escape letter can ever match: times/text/theta/tau/tan via t,
+# nu/nabla/neq/nint/not via n, rho via r, frac/forall via f, bar via b,
+# vee via v — uppercase-first commands (Re, Im) are unreachable because the
+# JSON escape letters are lowercase).
+_LATEX_COMMAND_TAILS = tuple(
+    dict.fromkeys(
+        (
+            "times", "text", "theta", "tau", "tan",
+            "nu", "nabla", "neq", "nint", "not",
+            "rho", "rangle", "right", "rceil", "rfloor", "frac", "forall",
+            "leq", "geq", "approx", "equiv", "pm", "cdot", "sqrt", "sum",
+            "int", "oint", "infty", "ldots", "dots", "alpha", "beta",
+            "gamma", "delta", "epsilon", "zeta", "eta", "iota", "kappa",
+            "lambda", "mu", "xi", "pi", "sigma", "phi", "chi", "psi",
+            "omega", "partial", "exists", "cup", "cap", "vee", "wedge", "mapsto",
+            "sim", "propto", "le", "ge", "mid", "ang", "deg", "hbar",
+            "ell", "Re", "Im", "sin", "cos", "log", "exp", "min", "max",
+            "lim", "arg", "mod", "bar",
+        )
+    )
+)
+
+# Escape letter -> the command tails that follow the control char in the
+# decoded text (the command minus the letter the escape consumed), longest
+# first so a specific command (nabla) wins over a prefix (nu).
+_ESCAPE_TAILS: dict = {}
+for _cmd in _LATEX_COMMAND_TAILS:
+    _first = _cmd[0]
+    if _first in _CONTROL_ESCAPE_LETTER.values() and _first.islower():
+        _ESCAPE_TAILS.setdefault(_first, []).append(_cmd[1:])
+for _letter in _ESCAPE_TAILS:
+    _ESCAPE_TAILS[_letter].sort(key=len, reverse=True)  # longest tail first
+
+
+def _restore_late_backslash_text(text: str, counts: dict) -> str:
+    """Restore LaTeX commands whose backslash a JSON decode consumed.
+
+    Where the model meant ``\\times`` inside a JSON string it sometimes
+    writes a single ``\\t``; the parser turns that into a TAB and the ``t``
+    is gone with it — the decoded text reads ``<TAB>imes`` (the PDF of task
+    10b502cf typeset an italic ``imes`` because KaTeX read the tab as a
+    math space and ``imes`` as an identifier). At each control char we
+    check whether the escape letter + the following text form a known
+    command and the char after the command tail is a non-word (or end):
+    ``<TAB>imes `` -> ``\\times ``. That is the only rewrite performed.
+
+    Fails forward: a control char whose following text is not a known
+    command tail (a real paragraph break before ``use``) is left byte-
+    identical. Idempotent: a restored ``\\times`` has no control char left
+    to re-match. Never raises.
+    """
+    if not text or not any(ch in text for ch in _CONTROL_ESCAPE_LETTER):
+        return text
+    out: list[str] = []
+    last = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        letter = _CONTROL_ESCAPE_LETTER.get(text[i])
+        if letter is None:
+            i += 1
+            continue
+        matched = False
+        for tail in _ESCAPE_TAILS.get(letter, ()):
+            at = i + 1
+            if not text.startswith(tail, at):
+                continue
+            after = at + len(tail)
+            if after < n and text[after].isalnum():
+                continue  # the tail is a prefix of a longer word — not a command
+            out.append(text[last:at - 1])
+            out.append("\\" + letter)  # the escape letter is the command's first char
+            last = at
+            i = after
+            counts["restored_late_backslash_commands"] += 1
+            matched = True
+            break
+        if not matched:
+            i += 1
+    if last < n:
+        out.append(text[last:])
+    return "".join(out) if out else text
+
+
+def _restore_late_backslash(report: ResearchReport) -> int:
+    """Assembly-time restore of JSON-eaten LaTeX backslashes: apply
+    `_restore_late_backslash_text` to every prose text holder (span text of
+    all block types, list items, table cells, block-level text,
+    executive-summary paragraphs) plus equation-block bodies. Code blocks
+    are never touched (a `\\t` in a code sample is a literal tab).
+
+    Runs FIRST in the assembly chain — before any whitespace normalization
+    (the control char must still be adjacent to the command tail) and
+    before the LaTeX wrap (a restored `\\times` is a backslash command the
+    run detector starts on). Returns the total number of commands restored
+    (lands in `quality.verification.restored_late_backslash_commands`).
+    Never raises.
+    """
+    counts = {"restored_late_backslash_commands": 0}
+    try:
+        for section in report.report.sections or []:
+            for block in section.blocks or []:
+                if block.type in (BlockType.code_block, "code_block"):
+                    continue  # code text: a tab is literal content
+                for span in block.spans or []:
+                    if isinstance(span, Span):
+                        new = _restore_late_backslash_text(span.text or "", counts)
+                        if new != span.text:
+                            logger.warning(
+                                "restored %d late-backslash LaTeX command(s) in span (before: %s | after: %s)",
+                                counts["restored_late_backslash_commands"],
+                                _snip(span.text, 50),
+                                _snip(new, 50),
+                            )
+                        span.text = new
+                for item in block.items or []:
+                    if isinstance(item, Span):
+                        item.text = _restore_late_backslash_text(item.text or "", counts)
+                for row in block.rows or []:
+                    if not isinstance(row, list):
+                        continue
+                    for i, cell in enumerate(row):
+                        if isinstance(cell, Span):
+                            row[i] = Span(
+                                text=_restore_late_backslash_text(cell.text or "", counts),
+                                citations=list(cell.citations),
+                            )
+                        elif isinstance(cell, str):
+                            row[i] = Span(
+                                text=_restore_late_backslash_text(cell, counts),
+                                citations=[],
+                            )
+                if block.type in (BlockType.equation, "equation"):
+                    if block.text:
+                        block.text = _restore_late_backslash_text(block.text or "", counts)
+                elif not (block.spans or []) and not (block.items or []):
+                    block.text = _restore_late_backslash_text(block.text or "", counts)
+
+        for i, para in enumerate(report.report.executive_summary or []):
+            if isinstance(para, str):
+                report.report.executive_summary[i] = _restore_late_backslash_text(para, counts)
+    except Exception:
+        logger.exception("late-backslash restore failed; continuing with control chars intact")
+    return counts["restored_late_backslash_commands"]
+
+
 def assemble_structured_report(
     *,
     sections: list,
@@ -1148,12 +1314,16 @@ def assemble_structured_report(
     source titles, drop empty bracket pairs), lint citation format (strip
     redundant key groups the renderer would double-print, insert missing
     terminal periods on cited sentence-final spans, collapse repeated
-    clause citations), decode JSON-style unicode escapes in math, promote
-    undelimited display-equation spans to equation blocks, wrap undelimited
-    inline LaTeX runs in prose spans with $...$, balance unmatched closing
-    braces in equation block bodies, normalize comparison_table row widths
-    to the header, and compute quality metrics. All repair counts land in
-    quality.verification.normalized_citations / decoded_unicode_escapes.
+    clause citations), restore LaTeX backslashes a JSON decode consumed
+    (a model `\\t` in JSON becomes a TAB with the `t` gone, leaving
+    `<TAB>imes` where `\\times` was — task 10b502cf), decode JSON-style
+    unicode escapes in math, promote undelimited display-equation spans to
+    equation blocks, wrap undelimited inline LaTeX runs in prose spans with
+    $...$, balance unmatched closing braces in equation block bodies,
+    normalize comparison_table row widths to the header, and compute quality
+    metrics. All repair counts land in
+    quality.verification.normalized_citations / decoded_unicode_escapes /
+    restored_late_backslash_commands.
     `evidence_json` is accepted for interface stability and reserved for
     future provenance fields.
     """
@@ -1194,6 +1364,7 @@ def assemble_structured_report(
     norm_counts = _normalize_citation_marks(report)
     lint_counts = _lint_citation_format(report, registry)
     decoded_escapes = _decode_unicode_escapes(report)
+    restored_backslashes = _restore_late_backslash(report)
     _promote_bare_equation_spans(report)
     _wrap_undelimited_latex(report)
     _balance_equation_bodies(report)
@@ -1214,6 +1385,7 @@ def assemble_structured_report(
             "repeated_cites_collapsed": lint_counts["repeated_cites_collapsed"],
         },
         "decoded_unicode_escapes": decoded_escapes,
+        "restored_late_backslash_commands": restored_backslashes,
     }
     if not_generated or orphan_gaps:
         gaps = list(report.quality.verification.get("gaps") or [])
@@ -1397,7 +1569,10 @@ def _math_run_start(text: str, i: int, protected) -> int:
     """Return the true start of a math run at/just before index i, or -1.
 
     Strong start signals (and only these):
-      S1: a backslash command (\\lambda, \\psi, ...)
+      S1: a backslash command (\\lambda, \\psi, ...) — absorbing ONE
+          preceding base: an opening group brace ({\\lambda_i}) or a bare
+          DIGIT across one space (8 \\times -> base 8; a multi-digit number
+          like 28 is NOT absorbed — only a standalone single digit)
       S2: a braced super/subscript (^{ ... _{) — absorbing ONE preceding
           alphanumeric base char (2^{N} -> base 2)
       S3: a ket/bra unit: ``|`` opening a ``|…\\rangle`` ket, or ``\\langle``
@@ -1414,6 +1589,14 @@ def _math_run_start(text: str, i: int, protected) -> int:
         s = i
         if s > 0 and text[s - 1] == "{" and not protected[s - 1]:
             s -= 1  # absorb an opening group brace: {\lambda_i}
+        elif (
+            s >= 2
+            and not protected[s - 2]
+            and text[s - 1] in _LATEX_SPACES
+            and text[s - 2].isdigit()
+            and (s < 3 or not text[s - 3].isalnum())
+        ):
+            s -= 2  # absorb a bare digit base across one space: 8 \times
         return s
     # S2: braced super/subscript with a base
     if c in "^_" and i + 1 < n and text[i + 1] == "{":
@@ -1451,9 +1634,17 @@ def _math_run_extent(text: str, start: int, protected) -> int:
     space when the next token looks mathematical. Stops at a run of >=2
     consecutive lowercase letters (prose words), >=3 uppercase, or a
     non-math character. A single lowercase letter continues (p_n, e^{i...}).
+
+    Brace-aware: the prose-word stops apply only at brace depth 0. Inside
+    a balanced {...} group a short word is a command ARGUMENT, not prose
+    (\\mathrm{nm} stays one run; the run extends THROUGH balanced braces
+    and only a depth-0 word/period ends it), so `8\\times 8\\,\\mathrm{nm}
+    isotropic` wraps as `$8\\times 8\\,\\mathrm{nm}$ isotropic` instead of
+    splitting at the argument.
     """
     j = start
     n = len(text)
+    depth = 0  # unescaped brace depth; prose-word stops apply at depth 0
     # Unit mode: the run began with a ket/bra opener — it then extends only
     # until the unit's closing delimiter (\rangle for kets, | for bras).
     mode = None
@@ -1503,13 +1694,23 @@ def _math_run_extent(text: str, start: int, protected) -> int:
             continue
         if c.isalpha():
             lr = _letter_run(text, j)
-            if lr and c.islower() and lr >= 2:
-                break  # prose word
-            if lr and c.isupper() and lr >= 3:
-                break  # prose acronym
-            j += lr
+            if depth == 0:
+                if lr and c.islower() and lr >= 2:
+                    break  # prose word (only outside braces)
+                if lr and c.isupper() and lr >= 3:
+                    break  # prose acronym (only outside braces)
+            j += lr  # inside braces the word is a command argument
             continue
-        if c in "{}^_0123456789=+-*/.~:;,()|":
+        if c == "{":
+            depth += 1
+            j += 1
+            continue
+        if c == "}":
+            if depth:
+                depth -= 1  # an unbalanced closer can't go negative
+            j += 1
+            continue
+        if c in "^_0123456789=+-*/.~:;,()|":
             j += 1
             continue
         if c in _LATEX_SPACES:
@@ -1600,8 +1801,9 @@ def _wrap_latex_in_text(text: str) -> tuple:
                 i += 1
                 continue
             if s < i:
-                # absorbed base/brace/ket char was already appended
-                out.pop()
+                # absorbed base/brace chars were already appended
+                for _ in range(i - s):
+                    out.pop()
             out.append(head + "$" + run + "$" + tail)
             wrapped += 1
             i = max(e, i + 1)
@@ -1662,6 +1864,15 @@ def _heal_malformed_math_regions(text: str) -> tuple:
     case, since a raw equation at least never breaks the PDF. Well-formed
     regions pass through byte-identical; the pass is idempotent and never
     raises. Returns (healed_text, n_regions_healed).
+
+    Splice discipline: a malformed region emits `text[i:j] + body` only —
+    the tail after the closing $ is NOT appended here, it is emitted exactly
+    once by the normal scan continuation (i = e) / the final `text[i:]`
+    append. (The earlier `+ text[e:]` double-emitted the tail, and the
+    8-pass loop re-discovered the $ delimiters copied into that tail and
+    re-healed them into ever-longer duplicate runs — task 10b502cf shipped
+    a sentence five times because of it.) A pass that changes nothing stops
+    the loop early; the 8-pass maximum bounds pathological input.
     """
     if not text or "$" not in text:
         return text, 0
@@ -1703,7 +1914,11 @@ def _heal_malformed_math_regions(text: str) -> tuple:
                 e = t + (2 if close_display else 1)
                 body = text[k:t]
                 if _region_malformed(body, display, close_display):
-                    out.append(text[i:j] + body + text[e:])
+                    # Strip both $, keep the body raw. The tail (text[e:]) is
+                    # deliberately NOT appended here: the scan resumes at e
+                    # and emits it exactly once, so a malformed region can
+                    # never duplicate what follows it.
+                    out.append(text[i:j] + body)
                     fixed += 1
                     i = e
                 else:

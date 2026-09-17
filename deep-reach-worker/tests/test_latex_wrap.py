@@ -142,6 +142,45 @@ def test_single_lowercase_base_arg_stays_math():
     assert "$x^2/|x|$ is bounded" in new
 
 
+def test_braced_argument_word_does_not_split_run():
+    # Real task 10b502cf sec2 span: the 2-letter word INSIDE \mathrm{...}
+    # used to terminate the run at the `{`, stranding a $ mid-brace. The
+    # bare digit base is absorbed across its space (KaTeX treats the inner
+    # space as a math space); the span ends after the closing brace.
+    new, k = _wrap_latex_in_text(
+        r"volume at 8 \times 8 \times 8\,\mathrm{nm} isotropic resolution."
+    )
+    assert k == 1
+    assert new == r"volume at $8 \times 8 \times 8\,\mathrm{nm}$ isotropic resolution."
+
+
+def test_braced_run_followed_by_prose_ends_after_brace():
+    new, k = _wrap_latex_in_text(r"x = y \mathrm{nm} isotropic words follow.")
+    assert k == 1
+    assert new == r"x = y $\mathrm{nm}$ isotropic words follow."
+
+
+def test_multidigit_number_base_not_absorbed():
+    # Only a standalone single digit is a base: `28 \times 9` starts at the
+    # command, not at the 28 (else prose like "room 28 \psi" would swallow 8).
+    new, k = _wrap_latex_in_text(r"values 28 \times 9 came from the scan")
+    assert k == 1
+    assert new == r"values 28 $\times 9$ came from the scan"
+
+
+def test_escaped_brace_does_not_change_depth():
+    new, k = _wrap_latex_in_text(r"literal \{ word after")
+    # \{ is escaped content (no group); the 2-letter word still stops any
+    # run, and no run starts here at all.
+    assert new == r"literal \{ word after" and k == 0
+
+
+def test_nested_braces_run_through_multiple_levels():
+    new, k = _wrap_latex_in_text(r"p(x) = f_{i{jk}} and the prose resumes here")
+    assert k == 1
+    assert new == r"p(x) = $f_{i{jk}}$ and the prose resumes here"
+
+
 def test_idempotent_second_pass_is_noop():
     t = "a 2^{N}-dimensional space with S_A = S_B entropy"
     once, k1 = _wrap_latex_in_text(t)
@@ -367,3 +406,50 @@ def test_full_pass_keeps_good_wraps_and_idempotent():
     _wrap_undelimited_latex(report)              # second pass: no churn
     texts2 = [s.text for b in report.report.sections[0].blocks for s in b.spans]
     assert texts2 == texts
+
+
+# ---------------------------------------------------------------------------
+# heal splice discipline (10b502cf defect A, heal half)
+# ---------------------------------------------------------------------------
+
+
+def test_heal_malformed_mid_sentence_tail_emitted_once():
+    # The old splice appended text[e:] AND let the scan re-emit text[i:] —
+    # the tail printed twice. Now: the sentence tail appears exactly once.
+    text = "The norm $\\frac{a}{b} must stay below the bound for stability."
+    out, n = _heal_malformed_math_regions(text)
+    assert n == 1
+    assert out.count("must stay below the bound") == 1
+    assert out == "The norm \\frac{a}{b} must stay below the bound for stability."
+
+
+def test_heal_copied_dollars_cannot_redouble_tail():
+    # Regression: with the double-emit in place, the 8-pass loop re-found the
+    # $ delimiters copied into the duplicated tail and re-healed them into
+    # ever-longer duplicate runs (the 5x sentence). Now idempotent.
+    text = "x $W_{$ij} rest of sentence continues here."
+    once, _ = _heal_malformed_math_regions(text)
+    twice, n2 = _heal_malformed_math_regions(once)
+    assert twice == once
+    assert n2 == 0
+    assert once.count("rest of sentence continues here.") == 1
+
+
+def test_heal_real_sec1_span_no_stutter():
+    # The real sec1 model span (task 10b502cf): one sentence with W_{ij}/
+    # J_{ab} runs. Brace-aware wrap keeps both regions balanced, so heal is a
+    # no-op and the sentence prints exactly once (it shipped 5x).
+    s = (
+        "Here W_{ij} is the synapse count between neurons i and j, "
+        "n_a is the size of type a, and the rescaled coupling J_{ab} "
+        "is a mean-field average per neuron pair."
+    )
+    wrapped, _ = _wrap_latex_in_text(s)
+    healed, n = _heal_malformed_math_regions(wrapped)
+    assert healed.count("is a mean-field average per neuron pair.") == 1
+    assert healed == (
+        "Here $W_{ij}$ is the synapse count between neurons i and j, "
+        "n_a is the size of type a, and the rescaled coupling $J_{ab}$ "
+        "is a mean-field average per neuron pair."
+    )
+    assert n == 0
