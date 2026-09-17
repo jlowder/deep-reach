@@ -29,6 +29,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
@@ -130,7 +131,9 @@ _run_model_stacks: Dict[Any, list] = {}
 _deep_run_lock = threading.Lock()
 
 
-def _install_tracked_run_models(budget: _LLMBudget, verbose: bool) -> list:
+def _install_tracked_run_models(
+    budget: _LLMBudget, verbose: bool, call_log: Optional["deque"] = None
+) -> list:
     """Swap each agent module's run_model with a budget-charging wrapper.
 
     The agents call `run_model` via their own module globals, so the swap
@@ -152,7 +155,24 @@ def _install_tracked_run_models(budget: _LLMBudget, verbose: bool) -> list:
         def make_wrapper(original, label):
             def wrapper(*args, **kwargs):
                 budget.charge(label, verbose=verbose)
-                return original(*args, **kwargs)
+                _t0 = time.perf_counter()
+                result = original(*args, **kwargs)
+                if call_log is not None:
+                    # Per-call usage entry for stats.llm_call_log; the append
+                    # is bounded by the deque's maxlen (drop-oldest) and the
+                    # summarizer never raises — observability must never
+                    # fail the call.
+                    try:
+                        call_log.append(
+                            _model_runner.summarize_usage(
+                                result,
+                                stage=label,
+                                elapsed_ms=(time.perf_counter() - _t0) * 1000.0,
+                            )
+                        )
+                    except Exception:
+                        pass
+                return result
 
             return wrapper
 
@@ -170,6 +190,33 @@ def _restore_tracked_run_models(originals: list) -> None:
             # Defensive (should not happen under _deep_run_lock): rebind
             # exactly what was bound before this install.
             module.run_model = original
+
+
+def _plan_better(retry_plan: dict, first_plan: dict) -> bool:
+    """Retry-wins rule for the decomposition retry: the retry wins when it
+    has MORE sub-questions; on a tie a model-produced plan (structured /
+    json-fallback / salvaged) beats the raw-query fallback — never the
+    other way around, so a tie can never regress to the fallback."""
+    n_retry = len(retry_plan.get("sub_questions") or [])
+    n_first = len(first_plan.get("sub_questions") or [])
+    if n_retry != n_first:
+        return n_retry > n_first
+    return (
+        retry_plan.get("source") != "fallback"
+        and first_plan.get("source") == "fallback"
+    )
+
+
+def _salvage_step_detail(plan: dict, cap: int) -> str:
+    """Step-log phrasing for a salvaged (truncated-then-repaired) plan.
+
+    ``cap`` is the decomposer's max_output_tokens; the "at N tokens" form
+    is used when the call consumed the full budget (the usual truncation
+    signature), "mid-JSON" when the brackets ran out without a cap hit.
+    """
+    n = len(plan.get("sub_questions") or [])
+    what = f"at {cap} tokens" if plan.get("salvage_capped") else "mid-JSON"
+    return f"plan truncated {what} — salvaged {n} complete sub-question(s)"
 
 
 def _read_doc_catalog() -> List[Dict[str, str]]:
@@ -590,6 +637,11 @@ def deep_research(
         "synthesis_failed": False,
         "synthesis_skipped": None,
     }
+    # Per-LLM-call usage/finish_reason log for THIS run (run-local: deep
+    # runs are serialized by _deep_run_lock, so entries can never
+    # interleave between runs). Bounded — drop-oldest at 200. Declared
+    # before the first _finish so every exit path can serialize it.
+    llm_call_log: "deque" = deque(maxlen=200)
     state: Dict[str, Any] = {
         "plan": None,
         "sub_question_evidence": {},
@@ -659,6 +711,9 @@ def deep_research(
         stats["wall_s"] = round(time.time() - started, 1)
         stats["sections"] = len(sections)
         stats["last_llm_error"] = _model_runner.last_llm_error
+        # Per-call usage/finish_reason log for THIS run (dropped-oldest
+        # bounded; one entry per run_model call, stage = agent label).
+        stats["llm_call_log"] = list(llm_call_log)
         return {"final_answer": final_answer, "state": state, "stats": stats}
 
     # Fail fast when the LLM key is unresolvable. The managed key resolves
@@ -691,7 +746,7 @@ def deep_research(
         # truncation-retry budget while run 1 is still writing (reset would
         # be an out-of-band write into a run that is in progress).
         reset_writer_retry_budget()  # fresh truncation-retry budget for this run
-        originals = _install_tracked_run_models(budget, verbose)
+        originals = _install_tracked_run_models(budget, verbose, call_log=llm_call_log)
         # ------------------------------------------------------------------
         # Doc catalog (empty → web-only mode, P1-6)
         # ------------------------------------------------------------------
@@ -714,39 +769,72 @@ def deep_research(
                 "the query could be decomposed."
             )
             return _finish(msg, error=msg)
+        cap = get_config().get_max_output_tokens("decomposer")
         plan = decompose_query(
             user_query, catalog, verbose=verbose, endpoint=endpoint, api_key=api_key
         )
-        if plan.get("source") == "fallback":
-            # One retry: an unusable structured call (preamble prose,
-            # malformed JSON, or — now that sub_questions has min_length=1 —
-            # a valid-but-empty plan) lands on the single-sub-question
-            # fallback plan. Make the cause visible in the worker log AND the
-            # task step list (on_stage/record_step — a bare _log_stage print
-            # never reached the API step log), then ask the model once more.
-            # Keep whichever plan has MORE sub-questions (on a tie the first);
-            # no further retries.
+        if plan.get("source") == "salvaged":
+            # The call was cut off mid-JSON; the complete sub-questions were
+            # repaired deterministically (decomposition_agent). A partial
+            # plan beats the single-query fallback, so no re-prompt is spent.
+            if verbose:
+                print(f"[DEEP] {_salvage_step_detail(plan, cap)}")
+            _notify_stage(1, _salvage_step_detail(plan, cap))
+            logger.info(
+                "[DEEP] decompose: %s; continuing with the partial plan",
+                _salvage_step_detail(plan, cap),
+            )
+        elif plan.get("source") == "fallback":
+            # One re-prompt: an unusable plan (preamble prose, malformed or
+            # empty JSON, or a truncated plan with no complete sub-question
+            # left to salvage) lands on the single-sub-question fallback
+            # plan. Make the cause visible in the worker log AND the task
+            # step list (on_stage/record_step — a bare _log_stage print
+            # never reached the API step log), then ask the model once more
+            # with the no-prose variant. Keep whichever plan has MORE
+            # sub-questions (on a tie the non-fallback wins); no further
+            # retries.
             reason = str(plan.get("fallback_reason") or "unusable plan")
             logger.warning(
-                "[DEEP] decompose: model returned an %s — retrying with fallback",
-                reason,
+                "[DEEP] decompose: model returned an %s — re-prompting", reason,
             )
             if budget.can_afford(1):
                 if verbose:
-                    print("[DEEP] decomposition source=fallback; retrying once")
-                _notify_stage(1, f"model returned an {reason} — retrying with fallback")
+                    print(
+                        f"[DEEP] decomposition source=fallback ({reason}); "
+                        "re-prompting once"
+                    )
+                _notify_stage(1, f"model returned an {reason} — re-prompting")
                 retry_plan = decompose_query(
                     user_query, catalog, verbose=verbose,
-                    endpoint=endpoint, api_key=api_key,
+                    endpoint=endpoint, api_key=api_key, reprompt=True,
                 )
-                if len(retry_plan.get("sub_questions") or []) > len(
-                    plan.get("sub_questions") or []
-                ):
+                if _plan_better(retry_plan, plan):
                     plan = retry_plan
+                src = plan.get("source")
+                if src == "salvaged":
+                    _notify_stage(1, f"re-prompt: {_salvage_step_detail(plan, cap)}")
+                elif src == "fallback":
+                    final_reason = str(plan.get("fallback_reason") or reason)
+                    _notify_stage(
+                        1,
+                        f"re-prompt still returned a {final_reason} — "
+                        "using single-sub-question fallback",
+                    )
+                    logger.warning(
+                        "[DEEP] decompose: re-prompt also unusable (%s); "
+                        "using single-sub-question fallback", final_reason,
+                    )
+                else:
+                    _notify_stage(
+                        1,
+                        "re-prompt returned a complete plan — "
+                        f"using {len(plan.get('sub_questions') or [])} sub-questions",
+                    )
             else:
                 print(
                     "[DEEP] WARNING: LLM budget exhausted before a decomposition "
-                    "retry; keeping the fallback plan."
+                    "re-prompt; keeping the fallback plan."
                 )
         state["plan"] = plan
         sub_questions = list(plan.get("sub_questions") or [])
