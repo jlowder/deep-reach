@@ -1121,6 +1121,172 @@ def _decode_unicode_escapes(report: ResearchReport) -> int:
     return counts["decoded_unicode_escapes"]
 
 
+# ---------------------------------------------------------------------------
+# Late-backslash restore (JSON-escape artifact, defect B of task 10b502cf)
+# ---------------------------------------------------------------------------
+
+# Control chars a JSON decode can produce where the model meant a LaTeX
+# command: the model writes a SINGLE backslash in its JSON (\times), the
+# parser consumes it as the escape, and the letter the escape names (t) is
+# gone with it — the decoded text is <TAB>imes. Mapping each C0 escape to
+# the letter it consumes.
+_CONTROL_ESCAPE_LETTER = {
+    "\t": "t",
+    "\n": "n",
+    "\r": "r",
+    "\f": "f",
+    "\b": "b",
+    "\v": "v",
+}
+
+# Known LaTeX commands whose first letter is a JSON-escape letter (the full
+# family is listed for documentation; only entries whose first letter is a
+# control-escape letter can ever match: times/text/theta/tau/tan via t,
+# nu/nabla/neq/nint/not via n, rho via r, frac/forall via f, bar via b,
+# vee via v — uppercase-first commands (Re, Im) are unreachable because the
+# JSON escape letters are lowercase).
+_LATEX_COMMAND_TAILS = tuple(
+    dict.fromkeys(
+        (
+            "times", "text", "theta", "tau", "tan",
+            "nu", "nabla", "neq", "nint", "not",
+            "rho", "rangle", "right", "rceil", "rfloor", "frac", "forall",
+            "leq", "geq", "approx", "equiv", "pm", "cdot", "sqrt", "sum",
+            "int", "oint", "infty", "ldots", "dots", "alpha", "beta",
+            "gamma", "delta", "epsilon", "zeta", "eta", "iota", "kappa",
+            "lambda", "mu", "xi", "pi", "sigma", "phi", "chi", "psi",
+            "omega", "partial", "exists", "cup", "cap", "vee", "wedge", "mapsto",
+            "sim", "propto", "le", "ge", "mid", "ang", "deg", "hbar",
+            "ell", "Re", "Im", "sin", "cos", "log", "exp", "min", "max",
+            "lim", "arg", "mod", "bar",
+        )
+    )
+)
+
+# Escape letter -> the command tails that follow the control char in the
+# decoded text (the command minus the letter the escape consumed), longest
+# first so a specific command (nabla) wins over a prefix (nu).
+_ESCAPE_TAILS: dict = {}
+for _cmd in _LATEX_COMMAND_TAILS:
+    _first = _cmd[0]
+    if _first in _CONTROL_ESCAPE_LETTER.values() and _first.islower():
+        _ESCAPE_TAILS.setdefault(_first, []).append(_cmd[1:])
+for _letter in _ESCAPE_TAILS:
+    _ESCAPE_TAILS[_letter].sort(key=len, reverse=True)  # longest tail first
+
+
+def _restore_late_backslash_text(text: str, counts: dict) -> str:
+    """Restore LaTeX commands whose backslash a JSON decode consumed.
+
+    Where the model meant ``\\times`` inside a JSON string it sometimes
+    writes a single ``\\t``; the parser turns that into a TAB and the ``t``
+    is gone with it — the decoded text reads ``<TAB>imes`` (the PDF of task
+    10b502cf typeset an italic ``imes`` because KaTeX read the tab as a
+    math space and ``imes`` as an identifier). At each control char we
+    check whether the escape letter + the following text form a known
+    command and the char after the command tail is a non-word (or end):
+    ``<TAB>imes `` -> ``\\times ``. That is the only rewrite performed.
+
+    Fails forward: a control char whose following text is not a known
+    command tail (a real paragraph break before ``use``) is left byte-
+    identical. Idempotent: a restored ``\\times`` has no control char left
+    to re-match. Never raises.
+    """
+    if not text or not any(ch in text for ch in _CONTROL_ESCAPE_LETTER):
+        return text
+    out: list[str] = []
+    last = 0
+    i = 0
+    n = len(text)
+    while i < n:
+        letter = _CONTROL_ESCAPE_LETTER.get(text[i])
+        if letter is None:
+            i += 1
+            continue
+        matched = False
+        for tail in _ESCAPE_TAILS.get(letter, ()):
+            at = i + 1
+            if not text.startswith(tail, at):
+                continue
+            after = at + len(tail)
+            if after < n and text[after].isalnum():
+                continue  # the tail is a prefix of a longer word — not a command
+            out.append(text[last:at - 1])
+            out.append("\\" + letter)  # the escape letter is the command's first char
+            last = at
+            i = after
+            counts["restored_late_backslash_commands"] += 1
+            matched = True
+            break
+        if not matched:
+            i += 1
+    if last < n:
+        out.append(text[last:])
+    return "".join(out) if out else text
+
+
+def _restore_late_backslash(report: ResearchReport) -> int:
+    """Assembly-time restore of JSON-eaten LaTeX backslashes: apply
+    `_restore_late_backslash_text` to every prose text holder (span text of
+    all block types, list items, table cells, block-level text,
+    executive-summary paragraphs) plus equation-block bodies. Code blocks
+    are never touched (a `\\t` in a code sample is a literal tab).
+
+    Runs FIRST in the assembly chain — before any whitespace normalization
+    (the control char must still be adjacent to the command tail) and
+    before the LaTeX wrap (a restored `\\times` is a backslash command the
+    run detector starts on). Returns the total number of commands restored
+    (lands in `quality.verification.restored_late_backslash_commands`).
+    Never raises.
+    """
+    counts = {"restored_late_backslash_commands": 0}
+    try:
+        for section in report.report.sections or []:
+            for block in section.blocks or []:
+                if block.type in (BlockType.code_block, "code_block"):
+                    continue  # code text: a tab is literal content
+                for span in block.spans or []:
+                    if isinstance(span, Span):
+                        new = _restore_late_backslash_text(span.text or "", counts)
+                        if new != span.text:
+                            logger.warning(
+                                "restored %d late-backslash LaTeX command(s) in span (before: %s | after: %s)",
+                                counts["restored_late_backslash_commands"],
+                                _snip(span.text, 50),
+                                _snip(new, 50),
+                            )
+                        span.text = new
+                for item in block.items or []:
+                    if isinstance(item, Span):
+                        item.text = _restore_late_backslash_text(item.text or "", counts)
+                for row in block.rows or []:
+                    if not isinstance(row, list):
+                        continue
+                    for i, cell in enumerate(row):
+                        if isinstance(cell, Span):
+                            row[i] = Span(
+                                text=_restore_late_backslash_text(cell.text or "", counts),
+                                citations=list(cell.citations),
+                            )
+                        elif isinstance(cell, str):
+                            row[i] = Span(
+                                text=_restore_late_backslash_text(cell, counts),
+                                citations=[],
+                            )
+                if block.type in (BlockType.equation, "equation"):
+                    if block.text:
+                        block.text = _restore_late_backslash_text(block.text or "", counts)
+                elif not (block.spans or []) and not (block.items or []):
+                    block.text = _restore_late_backslash_text(block.text or "", counts)
+
+        for i, para in enumerate(report.report.executive_summary or []):
+            if isinstance(para, str):
+                report.report.executive_summary[i] = _restore_late_backslash_text(para, counts)
+    except Exception:
+        logger.exception("late-backslash restore failed; continuing with control chars intact")
+    return counts["restored_late_backslash_commands"]
+
+
 def assemble_structured_report(
     *,
     sections: list,
@@ -1148,12 +1314,16 @@ def assemble_structured_report(
     source titles, drop empty bracket pairs), lint citation format (strip
     redundant key groups the renderer would double-print, insert missing
     terminal periods on cited sentence-final spans, collapse repeated
-    clause citations), decode JSON-style unicode escapes in math, promote
-    undelimited display-equation spans to equation blocks, wrap undelimited
-    inline LaTeX runs in prose spans with $...$, balance unmatched closing
-    braces in equation block bodies, normalize comparison_table row widths
-    to the header, and compute quality metrics. All repair counts land in
-    quality.verification.normalized_citations / decoded_unicode_escapes.
+    clause citations), restore LaTeX backslashes a JSON decode consumed
+    (a model `\\t` in JSON becomes a TAB with the `t` gone, leaving
+    `<TAB>imes` where `\\times` was — task 10b502cf), decode JSON-style
+    unicode escapes in math, promote undelimited display-equation spans to
+    equation blocks, wrap undelimited inline LaTeX runs in prose spans with
+    $...$, balance unmatched closing braces in equation block bodies,
+    normalize comparison_table row widths to the header, and compute quality
+    metrics. All repair counts land in
+    quality.verification.normalized_citations / decoded_unicode_escapes /
+    restored_late_backslash_commands.
     `evidence_json` is accepted for interface stability and reserved for
     future provenance fields.
     """
@@ -1194,6 +1364,7 @@ def assemble_structured_report(
     norm_counts = _normalize_citation_marks(report)
     lint_counts = _lint_citation_format(report, registry)
     decoded_escapes = _decode_unicode_escapes(report)
+    restored_backslashes = _restore_late_backslash(report)
     _promote_bare_equation_spans(report)
     _wrap_undelimited_latex(report)
     _balance_equation_bodies(report)
@@ -1214,6 +1385,7 @@ def assemble_structured_report(
             "repeated_cites_collapsed": lint_counts["repeated_cites_collapsed"],
         },
         "decoded_unicode_escapes": decoded_escapes,
+        "restored_late_backslash_commands": restored_backslashes,
     }
     if not_generated or orphan_gaps:
         gaps = list(report.quality.verification.get("gaps") or [])
