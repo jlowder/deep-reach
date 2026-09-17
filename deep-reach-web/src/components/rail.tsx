@@ -39,6 +39,12 @@ interface RailProps {
 
 let chipSeq = 0;
 
+// Per-file upload cap, mirrored from next.config.ts
+// (experimental.proxyClientMaxBodySize): the rewrite proxy truncates request
+// bodies above it, so an oversize file would arrive at the worker silently
+// incomplete. Reject it client-side instead.
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
 export function Rail({ queue, queueSyncedAt, queueSyncFailed, onCreated, onOpenSettings, settingsTriggerRef }: RailProps) {
   const [open, setOpen] = useState(false); // mobile collapse (below 960px)
   const fileRef = useRef<HTMLInputElement>(null);
@@ -53,15 +59,29 @@ export function Rail({ queue, queueSyncedAt, queueSyncFailed, onCreated, onOpenS
 
   async function addFiles(list: File[]) {
     if (list.length === 0) return;
-    const incoming: Chip[] = list.map((f) => ({
-      key: `c${++chipSeq}`,
-      name: f.name,
-      state: "uploading",
-    }));
+    const oversize = list.filter((f) => f.size > MAX_UPLOAD_BYTES);
+    const uploadable = list.filter((f) => f.size <= MAX_UPLOAD_BYTES);
+    const incoming: Chip[] = [
+      ...oversize.map((f): Chip => ({
+        key: `c${++chipSeq}`,
+        name: f.name,
+        state: "error",
+        reason: `too large (${(f.size / (1024 * 1024)).toFixed(1)} MB; max 20 MB)`,
+      })),
+      ...uploadable.map((f) => ({
+        key: `c${++chipSeq}`,
+        name: f.name,
+        state: "uploading" as const,
+      })),
+    ];
     setChips((prev) => [...prev, ...incoming]);
+    if (uploadable.length === 0) {
+      if (fileRef.current) fileRef.current.value = ""; // allow re-select
+      return; // nothing uploadable — no request
+    }
     setBusy(true);
     try {
-      const res = await api.uploadDocuments(list);
+      const res = await api.uploadDocuments(uploadable);
       const docs = await api.getDocuments(); // confirm against the registry
       const rejected: Chip[] = Object.entries(res.rejected).map(([name, reason]) => ({
         key: `c${++chipSeq}`,

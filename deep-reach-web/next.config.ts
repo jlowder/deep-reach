@@ -8,6 +8,15 @@ const DEEP_REACH_API_URL =
   process.env.DEEP_REACH_API_URL ?? "http://localhost:8320";
 
 const nextConfig: NextConfig = {
+  experimental: {
+    // Cap on request bodies proxied through the /api rewrite below. Next
+    // truncates anything over this (default 10MB —
+    // experimental.proxyClientMaxBodySize, renamed from
+    // middlewareClientMaxBodySize in Next 16): the clone feeding the upstream
+    // stream is cut off mid-body, so a 17MB PDF would reach the worker
+    // silently incomplete. Raised to 20MB for the PDF upload flow.
+    proxyClientMaxBodySize: "20mb",
+  },
   async rewrites() {
     return [
       {
