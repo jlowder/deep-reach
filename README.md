@@ -30,3 +30,33 @@ PIDs live in `logs/<service>.pid`, output in `logs/<service>.log`. Services that
 ## External LLM dependency
 
 The worker calls an external OpenAI-compatible LLM at `LLM_ENDPOINT` in `deep-reach-worker/utils/var.env` (default `http://localhost:8080`). Run that LLM server separately — if it is unreachable, the worker stays up but research requests will fail. `./run.sh start` prints a (non-fatal) warning when the endpoint is down. API keys now live in the OS keychain (service `deep-reach`) — `var.env` keeps only non-secret settings, and a worker restart migrates any plaintext keys still in it into the keyring.
+
+## Sample reports
+
+Reports generated end-to-end by deep-reach; PDFs and first-page thumbnails live in `docs/`. Click a thumbnail to open the PDF.
+
+<table>
+<tr>
+<td align="center" valign="top">
+<a href="docs/from_drosophila_male_connectome_to_artificial_neural_architectures.pdf"><img src="docs/from_drosophila_male_connectome_to_artificial_neural_architectures.png" alt="From Drosophila Male Connectome to Artificial Neural Architectures" width="280"></a><br>
+<strong>From Drosophila Male Connectome to Artificial Neural Architectures</strong><br>
+September 17, 2026<br>
+<a href="docs/from_drosophila_male_connectome_to_artificial_neural_architectures.pdf">open PDF</a>
+</td>
+<td align="center" valign="top">
+<a href="docs/how_llm_agents_generate_novel_solutions_to_hard_problems.pdf"><img src="docs/how_llm_agents_generate_novel_solutions_to_hard_problems.png" alt="How LLM Agents Generate Novel Solutions to Hard Problems" width="280"></a><br>
+<strong>How LLM Agents Generate Novel Solutions to Hard Problems</strong><br>
+September 12, 2026<br>
+<a href="docs/how_llm_agents_generate_novel_solutions_to_hard_problems.pdf">open PDF</a>
+</td>
+</tr>
+<tr>
+<td align="center" valign="top">
+<a href="docs/langlands_correspondences_as_wormholes_between_mathematical_domains.pdf"><img src="docs/langlands_correspondences_as_wormholes_between_mathematical_domains.png" alt="Langlands Correspondences as Wormholes Between Mathematical Domains" width="280"></a><br>
+<strong>Langlands Correspondences as Wormholes Between Mathematical Domains</strong><br>
+September 10, 2026<br>
+<a href="docs/langlands_correspondences_as_wormholes_between_mathematical_domains.pdf">open PDF</a>
+</td>
+<td></td>
+</tr>
+</table>
