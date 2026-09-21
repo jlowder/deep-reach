@@ -1,17 +1,36 @@
-# deep-reach
+# Deep Reach
 
-A multi-agent RAG deep-research system: an orchestrator coordinates Retriever/Writer/Verifier agents that ground their answers in local PDFs and the web, exposed through a Next.js web UI.
+This is a tool for performing deep research on the web, optionally augmented with local documents (RAG-style). This is similar to the "deep research" queries available with foundation models; the difference is that Deep Reach can be run locally - for both LLM compute resources and web search by way of SearXNG. Whereas foundation labs limit the number of deep research queries allowed each day - especially on the free tier - Deep Reach can be run completely free and without limits.
 
-## Services
+## Example reports
 
-| service   | dir                 | runtime | command                     | port | health            |
-|-----------|---------------------|---------|-----------------------------|------|-------------------|
-| worker    | `deep-reach-worker` | python  | `venv/bin/python api_server.py` | 8321 | `/health`        |
-| backend   | `deep-reach-backend`| node    | `npm run serve`             | 8322 | TCP (optionally `/openapi.json`) |
-| api       | `deep-reach-api`    | bun     | `bun run src/index.ts`      | 8320 | `/health`         |
-| web       | `deep-reach-web`    | node    | `npm run dev`               | 8323 | `/`               |
+Some example reports generated locally using a 35B LLM model:
 
-Dependency wiring: **web → api → { worker, backend }** — the web app rewrites `/api/*` to the glue api service, which proxies to the worker and backend.
+<table>
+<tr>
+<td align="center" valign="top">
+<a href="docs/from_drosophila_male_connectome_to_artificial_neural_architectures.pdf"><img src="docs/from_drosophila_male_connectome_to_artificial_neural_architectures.png" alt="From Drosophila Male Connectome to Artificial Neural Architectures" width="280"></a><br>
+<strong>From Drosophila Male Connectome to Artificial Neural Architectures</strong><br>
+September 17, 2026<br>
+<a href="docs/from_drosophila_male_connectome_to_artificial_neural_architectures.pdf">open PDF</a>
+</td>
+<td align="center" valign="top">
+<a href="docs/how_llm_agents_generate_novel_solutions_to_hard_problems.pdf"><img src="docs/how_llm_agents_generate_novel_solutions_to_hard_problems.png" alt="How LLM Agents Generate Novel Solutions to Hard Problems" width="280"></a><br>
+<strong>How LLM Agents Generate Novel Solutions to Hard Problems</strong><br>
+September 12, 2026<br>
+<a href="docs/how_llm_agents_generate_novel_solutions_to_hard_problems.pdf">open PDF</a>
+</td>
+</tr>
+<tr>
+<td align="center" valign="top">
+<a href="docs/langlands_correspondences_as_wormholes_between_mathematical_domains.pdf"><img src="docs/langlands_correspondences_as_wormholes_between_mathematical_domains.png" alt="Langlands Correspondences as Wormholes Between Mathematical Domains" width="280"></a><br>
+<strong>Langlands Correspondences as Wormholes Between Mathematical Domains</strong><br>
+September 10, 2026<br>
+<a href="docs/langlands_correspondences_as_wormholes_between_mathematical_domains.pdf">open PDF</a>
+</td>
+<td></td>
+</tr>
+</table>
 
 ## Usage
 
@@ -24,6 +43,17 @@ Dependency wiring: **web → api → { worker, backend }** — the web app rewri
 ./run.sh logs           # 30-line snapshot of all logs
 ./run.sh help
 ```
+
+## Services
+
+| service   | dir                 | runtime | command                     | port | health            |
+|-----------|---------------------|---------|-----------------------------|------|-------------------|
+| worker    | `deep-reach-worker` | python  | `venv/bin/python api_server.py` | 8321 | `/health`        |
+| backend   | `deep-reach-backend`| node    | `npm run serve`             | 8322 | TCP (optionally `/openapi.json`) |
+| api       | `deep-reach-api`    | bun     | `bun run src/index.ts`      | 8320 | `/health`         |
+| web       | `deep-reach-web`    | node    | `npm run dev`               | 8323 | `/`               |
+
+Dependency wiring: **web → api → { worker, backend }** — the web app rewrites `/api/*` to the glue api service, which proxies to the worker and backend.
 
 PIDs live in `logs/<service>.pid`, output in `logs/<service>.log`. Services that are already running are skipped; a missing runtime (e.g. no `bun`) warns and skips that service without aborting the run.
 
