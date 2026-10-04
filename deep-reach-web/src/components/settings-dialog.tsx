@@ -37,12 +37,13 @@ interface FormState {
   llm: { endpoint: string; model: string; thinking: boolean };
   search: { tool: SearchTool; searxng_url: string; throttle_ms: number };
   embeddings: { endpoint: string; model: string };
+  search_recovery: { retry_count: number; timeout_seconds: number; command: string };
 }
 
 type KeyName = "llm" | "tavily" | "embedding";
 const KEY_NAMES: KeyName[] = ["llm", "tavily", "embedding"];
 
-type TestTarget = "llm" | "search" | "embedding";
+type TestTarget = "llm" | "search" | "embedding" | "recovery";
 interface TestState {
   running: boolean;
   result: TestSettingResult | null;
@@ -58,6 +59,11 @@ function formFromSettings(s: Settings): FormState {
       throttle_ms: s.search.throttle_ms,
     },
     embeddings: { endpoint: s.embeddings.endpoint, model: s.embeddings.model },
+    search_recovery: {
+      retry_count: s.search_recovery.retry_count,
+      timeout_seconds: s.search_recovery.timeout_seconds,
+      command: s.search_recovery.command ?? "",
+    },
   };
 }
 
@@ -343,6 +349,7 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
     llm: emptyTest(),
     search: emptyTest(),
     embedding: emptyTest(),
+    recovery: emptyTest(),
   });
 
   const [saving, setSaving] = useState(false);
@@ -359,7 +366,7 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
       setForm(formFromSettings(s));
       setKeys({ llm: "", tavily: "", embedding: "" });
       setKeyTouched({ llm: false, tavily: false, embedding: false });
-      setTests({ llm: emptyTest(), search: emptyTest(), embedding: emptyTest() });
+      setTests({ llm: emptyTest(), search: emptyTest(), embedding: emptyTest(), recovery: emptyTest() });
     } catch (err) {
       setLoadError(err instanceof ApiError ? err.body || err.message : String(err));
     } finally {
@@ -450,12 +457,24 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
     if (form.search.throttle_ms !== saved.search.throttle_ms) return true;
     if (form.embeddings.endpoint !== saved.embeddings.endpoint) return true;
     if (form.embeddings.model !== saved.embeddings.model) return true;
+    if (form.search_recovery.retry_count !== saved.search_recovery.retry_count) return true;
+    if (form.search_recovery.timeout_seconds !== saved.search_recovery.timeout_seconds) return true;
+    if (form.search_recovery.command !== (saved.search_recovery.command ?? "")) return true;
     return KEY_NAMES.some((n) => keyTouched[n]);
   }, [saved, form, keyTouched]);
 
   const embeddingsDirty = useMemo(() => {
     if (!saved || !form) return false;
     return form.embeddings.endpoint !== saved.embeddings.endpoint || form.embeddings.model !== saved.embeddings.model;
+  }, [saved, form]);
+
+  const searchRecoveryDirty = useMemo(() => {
+    if (!saved || !form) return false;
+    return (
+      form.search_recovery.retry_count !== saved.search_recovery.retry_count ||
+      form.search_recovery.timeout_seconds !== saved.search_recovery.timeout_seconds ||
+      form.search_recovery.command !== (saved.search_recovery.command ?? "")
+    );
   }, [saved, form]);
 
   function buildPayload(): SaveSettingsPayload {
@@ -475,6 +494,11 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
     if (form.embeddings.endpoint !== saved.embeddings.endpoint) emb.endpoint = form.embeddings.endpoint;
     if (form.embeddings.model !== saved.embeddings.model) emb.model = form.embeddings.model;
     if (Object.keys(emb).length) p.embeddings = emb;
+    const searchRecovery: SaveSettingsPayload["search_recovery"] = {};
+    if (form.search_recovery.retry_count !== saved.search_recovery.retry_count) searchRecovery.retry_count = form.search_recovery.retry_count;
+    if (form.search_recovery.timeout_seconds !== saved.search_recovery.timeout_seconds) searchRecovery.timeout_seconds = form.search_recovery.timeout_seconds;
+    if (form.search_recovery.command !== (saved.search_recovery.command ?? "")) searchRecovery.command = form.search_recovery.command;
+    if (Object.keys(searchRecovery).length) p.search_recovery = searchRecovery;
     const keysPayload: Record<string, string> = {};
     for (const name of KEY_NAMES) if (keyTouched[name]) keysPayload[name] = keys[name];
     if (Object.keys(keysPayload).length) p.keys = keysPayload as SaveSettingsPayload["keys"];
@@ -515,6 +539,12 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
         endpoint: form.embeddings.endpoint || undefined,
         model: form.embeddings.model || undefined,
         key: keys.embedding || undefined,
+      };
+    if (target === "recovery")
+      payload.recovery = {
+        command: form.search_recovery.command || undefined,
+        retry_count: form.search_recovery.retry_count,
+        timeout_seconds: form.search_recovery.timeout_seconds,
       };
     setTests((t) => ({ ...t, [target]: { ...t[target], running: true, result: null, error: null } }));
     api
@@ -851,20 +881,103 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
               )}
 
               {tab === "advanced" && (
-                <div className="flex flex-col gap-2" aria-disabled="true">
-                  <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-dim">Coming later</p>
-                  {[
-                    "Per-agent models",
-                    "Reasoning effort",
-                    "Budgets",
-                  ].map((row) => (
-                    <div
-                      key={row}
-                      className="border border-hairline px-3 py-2 font-mono text-[12px] text-dim/50"
-                    >
-                      {row}
+                <div className="flex flex-col gap-5">
+                  {/* Search Recovery Section */}
+                  <div className="flex flex-col gap-3 border border-hairline p-4">
+                    <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-dim">Search Recovery</p>
+                    <div className="flex items-center gap-3">
+                      <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim" htmlFor="s-retry-count">
+                        Retry count
+                      </label>
+                      <input
+                        id="s-retry-count"
+                        type="number"
+                        min={0}
+                        max={5}
+                        value={form.search_recovery.retry_count}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            search_recovery: {
+                              ...form.search_recovery,
+                              retry_count: Math.max(0, Math.min(5, Number(e.target.value))),
+                            },
+                          })
+                        }
+                        className="w-20 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
+                      />
+                      <span className="font-mono text-[10px] text-dim">(0-5, default 1)</span>
                     </div>
-                  ))}
+                    <div className="flex items-center gap-3">
+                      <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim" htmlFor="s-timeout-seconds">
+                        Timeout seconds
+                      </label>
+                      <input
+                        id="s-timeout-seconds"
+                        type="number"
+                        min={1}
+                        max={3600}
+                        value={form.search_recovery.timeout_seconds}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            search_recovery: {
+                              ...form.search_recovery,
+                              timeout_seconds: Math.max(1, Math.min(3600, Number(e.target.value))),
+                            },
+                          })
+                        }
+                        className="w-24 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
+                      />
+                      <span className="font-mono text-[10px] text-dim">(1-3600, default 600)</span>
+                    </div>
+                    <div className="flex flex-col gap-1.5">
+                      <FieldLabel text="Recovery command" htmlFor="s-recovery-command" />
+                      <input
+                        id="s-recovery-command"
+                        type="text"
+                        value={form.search_recovery.command}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            search_recovery: { ...form.search_recovery, command: e.target.value },
+                          })
+                        }
+                        placeholder="e.g., sudo systemctl restart searxng"
+                        className="flex-1 rounded-none border border-hairline bg-field px-2 py-2 font-mono text-[12px]"
+                      />
+                      <div className="flex items-center gap-4">
+                        <TestButton running={tests.recovery.running} onClick={() => runTest("recovery")}>
+                          Test command
+                        </TestButton>
+                        <TestResultLine
+                          test={tests.recovery}
+                          renderOk={(r) => `Command succeeded · ${r.result_count ?? 0} results`}
+                        />
+                      </div>
+                      <p className="font-mono text-[10px] text-dim/70">
+                        When "no evidence" occurs, this command executes before each retry attempt.
+                        Leave blank to skip recovery commands.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Coming Soon */}
+                  <div className="flex flex-col gap-2">
+                    <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-dim">Future</p>
+                    {[
+                      "Per-agent models",
+                      "Reasoning effort",
+                      "Budgets",
+                    ].map((row) => (
+                      <div
+                        key={row}
+                        className="border border-hairline px-3 py-2 font-mono text-[12px] text-dim/50"
+                      >
+                        {row}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>

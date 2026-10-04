@@ -178,6 +178,12 @@ export interface SettingsKeyState {
 
 export type SearchTool = "tavily" | "searxng";
 
+export interface SearchRecoverySettings {
+  retry_count: number;
+  timeout_seconds: number;
+  command: string;
+}
+
 /** GET /settings (the dialog's loaded state). */
 export interface Settings {
   llm: {
@@ -197,6 +203,7 @@ export interface Settings {
     model: string;
     key: SettingsKeyState;
   };
+  search_recovery: SearchRecoverySettings;
   keyring: {
     available: boolean;
     backend: string | null;
@@ -212,6 +219,7 @@ export interface SaveSettingsPayload {
   llm?: { endpoint?: string; model?: string; thinking?: boolean };
   search?: { tool?: SearchTool; searxng_url?: string; throttle_ms?: number };
   embeddings?: { endpoint?: string; model?: string };
+  search_recovery?: { retry_count?: number; timeout_seconds?: number; command?: string };
   keys?: { llm?: string; tavily?: string; embedding?: string };
 }
 
@@ -224,10 +232,11 @@ export interface SaveSettingsResult extends Settings {
 /** POST /settings/test body: the target plus optional current-form values
  *  (including an entered key) that override the saved settings. */
 export interface TestSettingPayload {
-  target: "llm" | "search" | "embedding";
+  target: "llm" | "search" | "embedding" | "recovery";
   llm?: { endpoint?: string; model?: string; thinking?: boolean; key?: string };
   search?: { tool?: SearchTool; searxng_url?: string; throttle_ms?: number; key?: string };
   embedding?: { endpoint?: string; model?: string; key?: string };
+  recovery?: { command?: string; retry_count?: number; timeout_seconds?: number };
 }
 
 /** POST /settings/test response: ok + a per-target proof, or verbatim error. */
