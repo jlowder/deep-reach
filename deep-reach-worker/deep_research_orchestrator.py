@@ -27,6 +27,7 @@ import importlib
 import json
 import logging
 import re
+import subprocess
 import threading
 import time
 from collections import deque
@@ -74,6 +75,69 @@ from deep_research_structured import (
 )
 
 logger = logging.getLogger(__name__)
+
+# =============================================================================
+# SEARCH RECOVERY HELPERS
+# =============================================================================
+
+
+def _run_recovery_command(
+    command: str, timeout_seconds: int
+) -> Dict[str, Any]:
+    """Execute a user-configured recovery command safely.
+    
+    Returns {"success": bool, "output": str, "error": str?}.
+    Never raises: execution failures return success=False with details.
+    """
+    result = {"success": False, "output": "", "error": ""}
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+        result["output"] = proc.stdout or ""
+        if proc.stderr:
+            result["error"] = proc.stderr
+        result["success"] = proc.returncode == 0
+    except subprocess.TimeoutExpired:
+        result["error"] = f"Command timed out after {timeout_seconds}s"
+    except FileNotFoundError as e:
+        result["error"] = f"Command not found: {e}"
+    except Exception as e:
+        result["error"] = f"Command execution failed: {type(e).__name__}: {e}"
+    return result
+
+
+def _get_search_recovery_config() -> Dict[str, Any]:
+    """Read search recovery settings from config.
+    
+    Returns {"retry_count": int, "timeout_seconds": int, "command": str}.
+    """
+    try:
+        config = get_config()
+        retry_raw = getattr(config, "search_recovery_retry_count", "1")
+        try:
+            retry_count = max(0, min(5, int(retry_raw)))
+        except (ValueError, TypeError):
+            retry_count = 1
+
+        timeout_raw = getattr(config, "search_recovery_timeout_seconds", "600")
+        try:
+            timeout_seconds = max(1, min(3600, int(timeout_raw)))
+        except (ValueError, TypeError):
+            timeout_seconds = 600
+
+        command = getattr(config, "search_recovery_command", "") or ""
+        return {
+            "retry_count": retry_count,
+            "timeout_seconds": timeout_seconds,
+            "command": command.strip(),
+        }
+    except Exception:
+        return {"retry_count": 1, "timeout_seconds": 600, "command": ""}
 
 # Global LLM call budget for one deep-research run (plan B / P2-3 ≈ 40).
 # Worst-case tracked calls ≈ 45: decompose(1) + sufficiency/investigation
@@ -939,13 +1003,89 @@ def deep_research(
                         )
             packs[sq_id] = pack_dict
             state["sub_question_evidence"][sq_id] = packs[sq_id]
+            
+            # Search recovery: retry with user-configured command on zero-evidence.
             if evidence_pack_empty(pack_dict):
-                # Zero-evidence packs are the unsourced-run root cause; the
-                # step timeline is the only operator-visible record of it.
-                _notify_stage(
-                    2,
-                    f"no evidence retrieved for sub-question {len(packs)}/{len(sub_questions)} — check sources/budget",
-                )
+                recovery_cfg = _get_search_recovery_config()
+                retry_count = recovery_cfg["retry_count"]
+                timeout_seconds = recovery_cfg["timeout_seconds"]
+                recovery_command = recovery_cfg["command"]
+                
+                if retry_count > 0:
+                    recovered = False
+                    for attempt in range(1, retry_count + 1):
+                        if recovery_command:
+                            cmd_result = _run_recovery_command(
+                                recovery_command, timeout_seconds
+                            )
+                            if verbose:
+                                print(
+                                    f"[DEEP] Recovery command (attempt {attempt}/{retry_count}): "
+                                    f"success={cmd_result['success']}"
+                                )
+                            if cmd_result["output"]:
+                                print(f"[DEEP] Recovery output: {cmd_result['output'][:200]}")
+                        
+                        # Re-run the search for this sub-question
+                        if verbose:
+                            print(
+                                f"[DEEP] Retrying search for {sq_id} "
+                                f"(attempt {attempt}/{retry_count})"
+                            )
+                        pack_retry = retriever_agent(
+                            user_query,
+                            research_goal=goal,
+                            max_rounds=max_rounds,
+                            budget_doc=budget_doc,
+                            budget_web=budget_web,
+                            routes=routes,
+                            verbose=False,  # silence inner verbose during retries
+                            endpoint=endpoint,
+                            api_key=api_key,
+                        )
+                        pack_dict_retry = pack_retry.model_dump()
+                        
+                        if not evidence_pack_empty(pack_dict_retry):
+                            pack_dict = pack_dict_retry
+                            recovered = True
+                            _notify_stage(
+                                2,
+                                f"search recovered: sub-question {len(packs)}/{len(sub_questions)} "
+                                f"succeeded on attempt {attempt}/{retry_count}",
+                            )
+                            # Update cache with recovered evidence
+                            if cache_enabled:
+                                try:
+                                    sufficiency = pack_dict_retry.get("sufficiency") or {}
+                                    save_evidence(
+                                        session_id,
+                                        sq_question,
+                                        pack_dict_retry,
+                                        bool(sufficiency.get("is_sufficient")),
+                                        ttl_days=cache_ttl_days,
+                                    )
+                                except Exception as exc:
+                                    print(
+                                        f"[DEEP] WARNING: evidence cache save for recovered "
+                                        f"pack failed ({type(exc).__name__}: {exc})"
+                                    )
+                            break
+                    
+                    if not recovered:
+                        _notify_stage(
+                            2,
+                            f"no evidence retrieved for sub-question {len(packs)}/{len(sub_questions)} "
+                            f"— retry exhausted ({retry_count} attempt(s))",
+                        )
+                else:
+                    # No retries configured: original behavior
+                    _notify_stage(
+                        2,
+                        f"no evidence retrieved for sub-question {len(packs)}/{len(sub_questions)} — check sources/budget",
+                    )
+            
+            packs[sq_id] = pack_dict
+            state["sub_question_evidence"][sq_id] = packs[sq_id]
         total_web = sum(
             len(((p.get("web_evidence") or {}).get("results")) or [])
             for p in packs.values()
