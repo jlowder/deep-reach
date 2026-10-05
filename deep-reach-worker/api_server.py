@@ -870,6 +870,18 @@ def _validate_settings_payload(payload: dict) -> list:
     if "model" in emb and (not isinstance(emb["model"], str) or not emb["model"].strip()):
         details.append("embeddings.model must be a non-empty string")
 
+    search_recovery = section("search_recovery")
+    if "retry_count" in search_recovery:
+        rc = search_recovery["retry_count"]
+        if isinstance(rc, bool) or not isinstance(rc, int) or not 0 <= rc <= 5:
+            details.append("search_recovery.retry_count must be an integer between 0 and 5")
+    if "timeout_seconds" in search_recovery:
+        ts = search_recovery["timeout_seconds"]
+        if isinstance(ts, bool) or not isinstance(ts, int) or not 1 <= ts <= 3600:
+            details.append("search_recovery.timeout_seconds must be an integer between 1 and 3600")
+    if "command" in search_recovery and not isinstance(search_recovery["command"], str):
+        details.append("search_recovery.command must be a string")
+
     keys = payload.get("keys")
     if keys is not None and not isinstance(keys, dict):
         details.append("keys must be an object")
@@ -880,8 +892,8 @@ def _validate_settings_payload(payload: dict) -> list:
         elif not isinstance(value, str):
             details.append(f"keys.{name} must be a string (empty string deletes)")
 
-    if not any(payload.get(k) for k in ("llm", "search", "embeddings", "keys")):
-        details.append("nothing to update — provide llm, search, embeddings and/or keys")
+    if not any(payload.get(k) for k in ("llm", "search", "embeddings", "search_recovery", "keys")):
+        details.append("nothing to update — provide llm, search, embeddings, search_recovery and/or keys")
     return details
 
 
