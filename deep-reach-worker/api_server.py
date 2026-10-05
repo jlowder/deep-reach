@@ -740,6 +740,10 @@ def create_app(
         for field, var in (("endpoint", "EMBEDDING_ENDPOINT"), ("model", "EMBEDDING_MODEL")):
             if field in emb:
                 non_secret[var] = str(emb[field])
+        search_recovery = payload.get("search_recovery") or {}
+        for field, var in (("retry_count", "SEARCH_RECOVERY_RETRY_COUNT"), ("timeout_seconds", "SEARCH_RECOVERY_TIMEOUT_SECONDS"), ("command", "SEARCH_RECOVERY_COMMAND")):
+            if field in search_recovery:
+                non_secret[var] = str(search_recovery[field])
 
         keys = payload.get("keys") or {}
         key_map = {"llm": "llm-api-key", "tavily": "tavily-api-key", "embedding": "embedding-api-key"}

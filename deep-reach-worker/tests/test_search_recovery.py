@@ -1,8 +1,13 @@
-"""Unit tests for the search recovery mechanism (command execution and retry logic)."""
+"""Unit tests for the search recovery mechanism (command execution and retry logic).
+
+Tests both the low-level helpers and the integration with Config/ENV.
+All tests are hermetic (no real subprocess execution for recovery commands).
+"""
 
 import subprocess
 import pytest
 import importlib
+import os
 
 orch_mod = importlib.import_module("deep_research_orchestrator")
 
@@ -75,10 +80,14 @@ class TestGetSearchRecoveryConfig:
     """Tests for _get_search_recovery_config helper."""
 
     def test_defaults_when_unset(self, monkeypatch):
-        """Returns defaults when no config is set."""
-        monkeypatch.delattr(orch_mod.get_config(), "search_recovery_retry_count", raising=False)
-        monkeypatch.delattr(orch_mod.get_config(), "search_recovery_timeout_seconds", raising=False)
-        monkeypatch.delattr(orch_mod.get_config(), "search_recovery_command", raising=False)
+        """Returns defaults when no SEARCH_RECOVERY_* env vars are set."""
+        # Use fake config with defaults
+        class FakeConfig:
+            search_recovery_retry_count = 1
+            search_recovery_timeout_seconds = 600
+            search_recovery_command = None
+        
+        monkeypatch.setattr(orch_mod, "get_config", lambda: FakeConfig())
         
         config = orch_mod._get_search_recovery_config()
         assert config["retry_count"] == 1
@@ -86,10 +95,10 @@ class TestGetSearchRecoveryConfig:
         assert config["command"] == ""
 
     def test_uses_config_values(self, monkeypatch):
-        """Uses values from config when set."""
+        """Uses values from config when set (handles string or int)."""
         class FakeConfig:
-            search_recovery_retry_count = "3"
-            search_recovery_timeout_seconds = "120"
+            search_recovery_retry_count = 3  # or "3"
+            search_recovery_timeout_seconds = 120  # or "120"
             search_recovery_command = "sudo systemctl restart searxng"
         
         monkeypatch.setattr(orch_mod, "get_config", lambda: FakeConfig())
@@ -148,3 +157,17 @@ class TestGetSearchRecoveryConfig:
         assert config["retry_count"] == 1
         assert config["timeout_seconds"] == 600
         assert config["command"] == ""
+
+    def test_reads_actual_config_values(self, monkeypatch):
+        """Reads actual values from config (non-defaults)."""
+        class FakeConfig:
+            search_recovery_retry_count = 5
+            search_recovery_timeout_seconds = 1800
+            search_recovery_command = "systemctl restart searxng"
+        
+        monkeypatch.setattr(orch_mod, "get_config", lambda: FakeConfig())
+        
+        config = orch_mod._get_search_recovery_config()
+        assert config["retry_count"] == 5
+        assert config["timeout_seconds"] == 1800
+        assert config["command"] == "systemctl restart searxng"

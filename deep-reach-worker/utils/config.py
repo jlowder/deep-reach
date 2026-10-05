@@ -117,6 +117,11 @@ class Config:
     # the settings dialog never disagree on which key is in effect.
     tavily_api_key: Optional[str] = None
     embedding_api_key: Optional[str] = None
+
+    # Search recovery settings (loaded from env vars in get_config())
+    search_recovery_retry_count: int = 1
+    search_recovery_timeout_seconds: int = 600
+    search_recovery_command: Optional[str] = None
     
     # Per-agent overrides
     retriever_endpoint: Optional[str] = None
@@ -265,6 +270,27 @@ def get_config() -> Config:
             )
             doc_score_threshold = 0.2
 
+        # Safe-int: search recovery settings must not crash config loading.
+        try:
+            search_recovery_retry_count = max(0, min(5, int(os.getenv("SEARCH_RECOVERY_RETRY_COUNT", "1"))))
+        except (TypeError, ValueError):
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Invalid SEARCH_RECOVERY_RETRY_COUNT value; falling back to 1."
+            )
+            search_recovery_retry_count = 1
+
+        try:
+            search_recovery_timeout_seconds = max(1, min(3600, int(os.getenv("SEARCH_RECOVERY_TIMEOUT_SECONDS", "600"))))
+        except (TypeError, ValueError):
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Invalid SEARCH_RECOVERY_TIMEOUT_SECONDS value; falling back to 600."
+            )
+            search_recovery_timeout_seconds = 600
+
+        search_recovery_command = os.getenv("SEARCH_RECOVERY_COMMAND")
+
         # Managed secrets through the settings chain (keyring -> env ->
         # None): after the startup migration blanks the var.env key lines,
         # the keyring is the source of truth and the environment is the
@@ -328,6 +354,9 @@ def get_config() -> Config:
             ).strip().lower() in ("1", "true", "yes", "on"),
             evidence_cache_ttl_days=evidence_cache_ttl_days,
             doc_score_threshold=doc_score_threshold,
+            search_recovery_retry_count=search_recovery_retry_count,
+            search_recovery_timeout_seconds=search_recovery_timeout_seconds,
+            search_recovery_command=search_recovery_command,
         )
         
         # Validate configurations and issue warnings
