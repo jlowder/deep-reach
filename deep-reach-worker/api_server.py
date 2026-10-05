@@ -773,8 +773,8 @@ def create_app(
         if not isinstance(payload, dict):
             return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
         target = payload.get("target")
-        if target not in ("llm", "search", "embedding"):
-            return JSONResponse({"error": "target must be 'llm', 'search' or 'embedding'"}, status_code=400)
+        if target not in ("llm", "search", "embedding", "recovery"):
+            return JSONResponse({"error": "target must be 'llm', 'search', 'embedding' or 'recovery'"}, status_code=400)
         form = payload.get(target)
         if form is None:
             form = {}
@@ -785,6 +785,10 @@ def create_app(
             return _test_llm(form, eff)
         if target == "search":
             return _test_search(form, eff)
+        if target == "embedding":
+            return _test_embedding(form, eff)
+        if target == "recovery":
+            return _test_recovery(form)
         return _test_embedding(form, eff)
 
     return app
@@ -1000,6 +1004,56 @@ def _test_embedding(form: dict, eff: dict) -> dict:
             }
         finally:
             client.close()
+    except Exception as e:
+        return {
+            "ok": False,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+
+def _test_recovery(form: dict) -> dict:
+    """Test a recovery command execution (target='recovery')."""
+    import subprocess
+
+    command = form.get("command") or ""
+    if not command:
+        return {
+            "ok": False,
+            "error": "recovery.command must be set to test the command execution",
+        }
+    
+    retry_count = int(form.get("retry_count") or 1)
+    timeout_seconds = int(form.get("timeout_seconds") or 600)
+    
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=min(timeout_seconds, 30),  # Cap test timeout at 30s
+        )
+        success = proc.returncode == 0
+        return {
+            "ok": success,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "output": proc.stdout[:500] if proc.stdout else "",
+            "error": proc.stderr[:500] if proc.stderr else "",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "error": f"Command timed out after 30s (configured: {timeout_seconds}s)",
+        }
+    except FileNotFoundError as e:
+        return {
+            "ok": False,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "error": f"Command not found: {e}",
+        }
     except Exception as e:
         return {
             "ok": False,
