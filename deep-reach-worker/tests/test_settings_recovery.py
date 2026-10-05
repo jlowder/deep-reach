@@ -20,7 +20,7 @@ class TestSearchRecoveryVarEnv:
         
         recovery_data = {
             "SEARCH_RECOVERY_RETRY_COUNT": "3",
-            "SEARCH_RECOVERY_TIMEOUT_SECONDS": "900",
+            "SEARCH_RECOVERY_COOL_DOWN_SECONDS": "900",
             "SEARCH_RECOVERY_COMMAND": "docker restart searxng"
         }
         
@@ -29,7 +29,7 @@ class TestSearchRecoveryVarEnv:
         
         content = s.read_var_env(p)
         assert content["SEARCH_RECOVERY_RETRY_COUNT"] == "3"
-        assert content["SEARCH_RECOVERY_TIMEOUT_SECONDS"] "900"
+        assert content["SEARCH_RECOVERY_COOL_DOWN_SECONDS"] "900"
         assert content["SEARCH_RECOVERY_COMMAND"] == "docker restart searxng"
 
     def test_read_var_env_reads_recovery_fields(self, tmp_path):
@@ -38,14 +38,14 @@ class TestSearchRecoveryVarEnv:
         content = """# Config
 LLM_ENDPOINT=http://localhost:8080/v1
 SEARCH_RECOVERY_RETRY_COUNT=4
-SEARCH_RECOVERY_TIMEOUT_SECONDS=1200
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=1200
 SEARCH_RECOVERY_COMMAND=systemctl restart searxng
 """
         p.write_text(content)
         
         parsed = s.read_var_env(p)
         assert parsed["SEARCH_RECOVERY_RETRY_COUNT"] == "4"
-        assert parsed["SEARCH_RECOVERY_TIMEOUT_SECONDS"] == "1200"
+        assert parsed["SEARCH_RECOVERY_COOL_DOWN_SECONDS"] == "1200"
         assert parsed["SEARCH_RECOVERY_COMMAND"] == "systemctl restart searxng"
 
     def test_effective_settings_includes_recovery(self, tmp_path):
@@ -53,7 +53,7 @@ SEARCH_RECOVERY_COMMAND=systemctl restart searxng
         p = tmp_path / "var.env"
         p.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
 SEARCH_RECOVERY_RETRY_COUNT=5
-SEARCH_RECOVERY_TIMEOUT_SECONDS=1800
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=1800
 SEARCH_RECOVERY_COMMAND=docker compose restart searxng
 """)
         
@@ -72,7 +72,7 @@ SEARCH_RECOVERY_COMMAND=docker compose restart searxng
             
             effective = s.effective_settings(p)
             assert effective["SEARCH_RECOVERY_RETRY_COUNT"] == "5"
-            assert effective["SEARCH_RECOVERY_TIMEOUT_SECONDS"] == "1800"
+            assert effective["SEARCH_RECOVERY_COOL_DOWN_SECONDS"] == "1800"
             assert effective["SEARCH_RECOVERY_COMMAND"] == "docker compose restart searxng"
         finally:
             # Restore original
@@ -88,21 +88,21 @@ SEARCH_RECOVERY_COMMAND=docker compose restart searxng
         p = tmp_path / "var.env"
         p.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
 SEARCH_RECOVERY_RETRY_COUNT=2
-SEARCH_RECOVERY_TIMEOUT_SECONDS=600
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=600
 SEARCH_RECOVERY_COMMAND=test_command
 """)
         
         monkeypatch.setattr(s, "VAR_ENV_PATH", p)
         
         # Clear from env
-        for k in ["SEARCH_RECOVERY_RETRY_COUNT", "SEARCH_RECOVERY_TIMEOUT_SECONDS", "SEARCH_RECOVERY_COMMAND"]:
+        for k in ["SEARCH_RECOVERY_RETRY_COUNT", "SEARCH_RECOVERY_COOL_DOWN_SECONDS", "SEARCH_RECOVERY_COMMAND"]:
             if k in os.environ:
                 monkeypatch.delenv(k, raising=False)
         
         s.reload_settings(p)
         
         assert os.environ.get("SEARCH_RECOVERY_RETRY_COUNT") == "2"
-        assert os.environ.get("SEARCH_RECOVERY_TIMEOUT_SECONDS") == "600"
+        assert os.environ.get("SEARCH_RECOVERY_COOL_DOWN_SECONDS") == "600"
         assert os.environ.get("SEARCH_RECOVERY_COMMAND") == "test_command"
 
     def test_config_reset_on_reload(self, tmp_path, monkeypatch):
@@ -113,7 +113,7 @@ SEARCH_RECOVERY_COMMAND=test_command
         # Initial state
         p.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
 SEARCH_RECOVERY_RETRY_COUNT=1
-SEARCH_RECOVERY_TIMEOUT_SECONDS=600
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=600
 SEARCH_RECOVERY_COMMAND=
 """)
         monkeypatch.setattr(s, "VAR_ENV_PATH", p)
@@ -124,13 +124,13 @@ SEARCH_RECOVERY_COMMAND=
         # Update var.env
         p.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
 SEARCH_RECOVERY_RETRY_COUNT=5
-SEARCH_RECOVERY_TIMEOUT_SECONDS=1500
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=1500
 SEARCH_RECOVERY_COMMAND=new_command
 """)
         s.reload_settings(p)
         cfg2 = config_mod.get_config()
         assert cfg2.search_recovery_retry_count == 5
-        assert cfg2.search_recovery_timeout_seconds == 1500
+        assert cfg2.search_recovery_cool_down_seconds == 1500
         assert cfg2.search_recovery_command == "new_command"
 
 
@@ -138,12 +138,12 @@ class TestSearchRecoveryInSettingsView:
     """Tests that settings_view() includes search_recovery section."""
 
     def test_settings_view_includes_recovery_section(self, tmp_path, monkeypatch):
-        """settings_view() returns search_recovery with retry_count, timeout_seconds, command."""
+        """settings_view() returns search_recovery with retry_count, cool_down_seconds, command."""
         import os
         p = tmp_path / "var.env"
         p.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
 SEARCH_RECOVERY_RETRY_COUNT=3
-SEARCH_RECOVERY_TIMEOUT_SECONDS=900
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=900
 SEARCH_RECOVERY_COMMAND=docker restart searxng
 """)
         
@@ -154,11 +154,11 @@ SEARCH_RECOVERY_COMMAND=docker restart searxng
         
         assert "search_recovery" in view
         assert "retry_count" in view["search_recovery"]
-        assert "timeout_seconds" in view["search_recovery"]
+        assert "cool_down_seconds" in view["search_recovery"]
         assert "command" in view["search_recovery"]
         
         assert view["search_recovery"]["retry_count"] == 3
-        assert view["search_recovery"]["timeout_seconds"] == 900
+        assert view["search_recovery"]["cool_down_seconds"] == 900
         assert view["search_recovery"]["command"] == "docker restart searxng"
 
     def test_settings_view_defaults_when_unset(self, tmp_path, monkeypatch):
@@ -173,7 +173,7 @@ SEARCH_RECOVERY_COMMAND=docker restart searxng
         view = s.settings_view(p)
         
         assert view["search_recovery"]["retry_count"] == 1
-        assert view["search_recovery"]["timeout_seconds"] == 600
+        assert view["search_recovery"]["cool_down_seconds"] == 600
         assert view["search_recovery"]["command"] == ""
 
     def test_settings_view_clamps_retry_count(self, tmp_path, monkeypatch):
@@ -191,18 +191,18 @@ SEARCH_RECOVERY_RETRY_COUNT=10
         assert view["search_recovery"]["retry_count"] == 5  # capped
 
     def test_settings_view_clamps_timeout(self, tmp_path, monkeypatch):
-        """settings_view() clamps timeout_seconds to 1-3600 range."""
+        """settings_view() clamps cool_down_seconds to 1-3600 range."""
         import os
         p = tmp_path / "var.env"
         p.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
-SEARCH_RECOVERY_TIMEOUT_SECONDS=5000
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=5000
 """)
         
         monkeypatch.setattr(s, "VAR_ENV_PATH", p)
         monkeypatch.setattr(s, "_KEYRING", None)
         
         view = s.settings_view(p)
-        assert view["search_recovery"]["timeout_seconds"] == 3600  # capped
+        assert view["search_recovery"]["cool_down_seconds"] == 3600  # capped
 
     def test_settings_view_handles_invalid_retry_count(self, tmp_path, monkeypatch):
         """settings_view() uses default for invalid retry_count."""
@@ -219,15 +219,15 @@ SEARCH_RECOVERY_RETRY_COUNT=bad
         assert view["search_recovery"]["retry_count"] == 1  # default
 
     def test_settings_view_handles_invalid_timeout(self, tmp_path, monkeypatch):
-        """settings_view() uses default for invalid timeout_seconds."""
+        """settings_view() uses default for invalid cool_down_seconds."""
         import os
         p = tmp_path / "var.env"
         p.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
-SEARCH_RECOVERY_TIMEOUT_SECONDS=bad
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=bad
 """)
         
         monkeypatch.setattr(s, "VAR_ENV_PATH", p)
         monkeypatch.setattr(s, "_KEYRING", None)
         
         view = s.settings_view(p)
-        assert view["search_recovery"]["timeout_seconds"] == 600  # default
+        assert view["search_recovery"]["cool_down_seconds"] == 600  # default

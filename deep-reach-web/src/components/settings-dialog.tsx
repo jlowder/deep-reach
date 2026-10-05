@@ -37,7 +37,7 @@ interface FormState {
   llm: { endpoint: string; model: string; thinking: boolean };
   search: { tool: SearchTool; searxng_url: string; throttle_ms: number };
   embeddings: { endpoint: string; model: string };
-  search_recovery: { retry_count: number; timeout_seconds: number; command: string };
+  search_recovery: { retry_count: number; cool_down_minutes: number; cool_down_seconds: number; command: string };
 }
 
 type KeyName = "llm" | "tavily" | "embedding";
@@ -61,7 +61,8 @@ function formFromSettings(s: Settings): FormState {
     embeddings: { endpoint: s.embeddings.endpoint, model: s.embeddings.model },
     search_recovery: {
       retry_count: s.search_recovery.retry_count,
-      timeout_seconds: s.search_recovery.timeout_seconds,
+      cool_down_minutes: Math.floor(s.search_recovery.cool_down_seconds / 60),
+      cool_down_seconds: s.search_recovery.cool_down_seconds % 60,
       command: s.search_recovery.command ?? "",
     },
   };
@@ -458,7 +459,9 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
     if (form.embeddings.endpoint !== saved.embeddings.endpoint) return true;
     if (form.embeddings.model !== saved.embeddings.model) return true;
     if (form.search_recovery.retry_count !== saved.search_recovery.retry_count) return true;
-    if (form.search_recovery.timeout_seconds !== saved.search_recovery.timeout_seconds) return true;
+    const formCoolDown = form.search_recovery.cool_down_minutes * 60 + form.search_recovery.cool_down_seconds;
+    const savedCoolDown = saved.search_recovery.cool_down_seconds;
+    if (formCoolDown !== savedCoolDown) return true;
     if (form.search_recovery.command !== (saved.search_recovery.command ?? "")) return true;
     return KEY_NAMES.some((n) => keyTouched[n]);
   }, [saved, form, keyTouched]);
@@ -470,9 +473,11 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
 
   const searchRecoveryDirty = useMemo(() => {
     if (!saved || !form) return false;
+    const formCoolDown = form.search_recovery.cool_down_minutes * 60 + form.search_recovery.cool_down_seconds;
+    const savedCoolDown = saved.search_recovery.cool_down_seconds;
     return (
       form.search_recovery.retry_count !== saved.search_recovery.retry_count ||
-      form.search_recovery.timeout_seconds !== saved.search_recovery.timeout_seconds ||
+      formCoolDown !== savedCoolDown ||
       form.search_recovery.command !== (saved.search_recovery.command ?? "")
     );
   }, [saved, form]);
@@ -496,7 +501,8 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
     if (Object.keys(emb).length) p.embeddings = emb;
     const searchRecovery: SaveSettingsPayload["search_recovery"] = {};
     if (form.search_recovery.retry_count !== saved.search_recovery.retry_count) searchRecovery.retry_count = form.search_recovery.retry_count;
-    if (form.search_recovery.timeout_seconds !== saved.search_recovery.timeout_seconds) searchRecovery.timeout_seconds = form.search_recovery.timeout_seconds;
+    const formCoolDown = form.search_recovery.cool_down_minutes * 60 + form.search_recovery.cool_down_seconds;
+    if (formCoolDown !== saved.search_recovery.cool_down_seconds) searchRecovery.cool_down_seconds = formCoolDown;
     if (form.search_recovery.command !== (saved.search_recovery.command ?? "")) searchRecovery.command = form.search_recovery.command;
     if (Object.keys(searchRecovery).length) p.search_recovery = searchRecovery;
     const keysPayload: Record<string, string> = {};
@@ -544,7 +550,7 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
       payload.recovery = {
         command: form.search_recovery.command || undefined,
         retry_count: form.search_recovery.retry_count,
-        timeout_seconds: form.search_recovery.timeout_seconds,
+        cool_down_seconds: form.search_recovery.cool_down_minutes * 60 + form.search_recovery.cool_down_seconds,
       };
     setTests((t) => ({ ...t, [target]: { ...t[target], running: true, result: null, error: null } }));
     api
@@ -908,28 +914,54 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
                       />
                       <span className="font-mono text-[10px] text-dim">(0-5, default 1)</span>
                     </div>
-                    <div className="flex items-center gap-3">
-                      <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim" htmlFor="s-timeout-seconds">
-                        Timeout seconds
-                      </label>
-                      <input
-                        id="s-timeout-seconds"
-                        type="number"
-                        min={1}
-                        max={3600}
-                        value={form.search_recovery.timeout_seconds}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            search_recovery: {
-                              ...form.search_recovery,
-                              timeout_seconds: Math.max(1, Math.min(3600, Number(e.target.value))),
-                            },
-                          })
-                        }
-                        className="w-24 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
-                      />
-                      <span className="font-mono text-[10px] text-dim">(1-3600, default 600)</span>
+                    <div className="flex flex-col gap-3">
+                      <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim">Cool-down</label>
+                      <div className="flex items-center gap-3">
+                        <select
+                          id="s-cool-down-minutes"
+                          value={form.search_recovery.cool_down_minutes}
+                          onChange={(e) =>
+                            setForm({
+                              ...form,
+                              search_recovery: {
+                                ...form.search_recovery,
+                                cool_down_minutes: Number(e.target.value),
+                              },
+                            })
+                          }
+                          className="w-28 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
+                        >
+                          <option value={0}>0 minutes</option>
+                          <option value={1}>1 minute</option>
+                          <option value={5}>5 minutes</option>
+                          <option value={10}>10 minutes</option>
+                          <option value={15}>15 minutes</option>
+                          <option value={30}>30 minutes</option>
+                          <option value={60}>60 minutes</option>
+                          <option value={120}>120 minutes</option>
+                          <option value={999}>Custom...</option>
+                        </select>
+                        <input
+                          id="s-cool-down-seconds"
+                          type="number"
+                          min={0}
+                          max={59}
+                          value={form.search_recovery.cool_down_seconds}
+                          onChange={(e) =>
+                            setForm({
+                              ...form,
+                              search_recovery: {
+                                ...form.search_recovery,
+                                cool_down_seconds: Math.max(0, Math.min(59, Number(e.target.value))),
+                              },
+                            })
+                          }
+                          className="w-20 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
+                          disabled={form.search_recovery.cool_down_minutes === 999}
+                          placeholder={form.search_recovery.cool_down_minutes === 999 ? "0-59" : "0"}
+                        />
+                        <span className="font-mono text-[10px] text-dim">(minutes + seconds, default 1 min)</span>
+                      </div>
                     </div>
                     <div className="flex flex-col gap-1.5">
                       <FieldLabel text="Recovery command" htmlFor="s-recovery-command" />

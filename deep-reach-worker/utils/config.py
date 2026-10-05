@@ -120,7 +120,7 @@ class Config:
 
     # Search recovery settings (loaded from env vars in get_config())
     search_recovery_retry_count: int = 1
-    search_recovery_timeout_seconds: int = 600
+    search_recovery_cool_down_seconds: int = 60
     search_recovery_command: Optional[str] = None
     
     # Per-agent overrides
@@ -281,13 +281,13 @@ def get_config() -> Config:
             search_recovery_retry_count = 1
 
         try:
-            search_recovery_timeout_seconds = max(1, min(3600, int(os.getenv("SEARCH_RECOVERY_TIMEOUT_SECONDS", "600"))))
+            search_recovery_cool_down_seconds = max(1, min(7200, int(os.getenv("SEARCH_RECOVERY_COOL_DOWN_SECONDS", "60"))))
         except (TypeError, ValueError):
             logger = logging.getLogger(__name__)
             logger.warning(
-                "Invalid SEARCH_RECOVERY_TIMEOUT_SECONDS value; falling back to 600."
+                "Invalid SEARCH_RECOVERY_COOL_DOWN_SECONDS value; falling back to 60."
             )
-            search_recovery_timeout_seconds = 600
+            search_recovery_cool_down_seconds = 60
 
         search_recovery_command = os.getenv("SEARCH_RECOVERY_COMMAND")
 
@@ -355,7 +355,7 @@ def get_config() -> Config:
             evidence_cache_ttl_days=evidence_cache_ttl_days,
             doc_score_threshold=doc_score_threshold,
             search_recovery_retry_count=search_recovery_retry_count,
-            search_recovery_timeout_seconds=search_recovery_timeout_seconds,
+            search_recovery_cool_down_seconds=search_recovery_cool_down_seconds,
             search_recovery_command=search_recovery_command,
         )
         

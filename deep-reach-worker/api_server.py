@@ -741,7 +741,7 @@ def create_app(
             if field in emb:
                 non_secret[var] = str(emb[field])
         search_recovery = payload.get("search_recovery") or {}
-        for field, var in (("retry_count", "SEARCH_RECOVERY_RETRY_COUNT"), ("timeout_seconds", "SEARCH_RECOVERY_TIMEOUT_SECONDS"), ("command", "SEARCH_RECOVERY_COMMAND")):
+        for field, var in (("retry_count", "SEARCH_RECOVERY_RETRY_COUNT"), ("cool_down_seconds", "SEARCH_RECOVERY_COOL_DOWN_SECONDS"), ("command", "SEARCH_RECOVERY_COMMAND")):
             if field in search_recovery:
                 non_secret[var] = str(search_recovery[field])
 
@@ -879,10 +879,10 @@ def _validate_settings_payload(payload: dict) -> list:
         rc = search_recovery["retry_count"]
         if isinstance(rc, bool) or not isinstance(rc, int) or not 0 <= rc <= 5:
             details.append("search_recovery.retry_count must be an integer between 0 and 5")
-    if "timeout_seconds" in search_recovery:
-        ts = search_recovery["timeout_seconds"]
-        if isinstance(ts, bool) or not isinstance(ts, int) or not 1 <= ts <= 3600:
-            details.append("search_recovery.timeout_seconds must be an integer between 1 and 3600")
+    if "cool_down_seconds" in search_recovery:
+        ts = search_recovery["cool_down_seconds"]
+        if isinstance(ts, bool) or not isinstance(ts, int) or not 1 <= ts <= 7200:
+            details.append("search_recovery.cool_down_seconds must be an integer between 1 and 7200")
     if "command" in search_recovery and not isinstance(search_recovery["command"], str):
         details.append("search_recovery.command must be a string")
 
@@ -1040,7 +1040,7 @@ def _test_recovery(form: dict) -> dict:
         }
     
     retry_count = int(form.get("retry_count") or 1)
-    timeout_seconds = int(form.get("timeout_seconds") or 600)
+    cool_down_seconds = int(form.get("cool_down_seconds") or 60)
     
     started = time.monotonic()
     try:
@@ -1049,7 +1049,7 @@ def _test_recovery(form: dict) -> dict:
             shell=True,
             capture_output=True,
             text=True,
-            timeout=min(timeout_seconds, 30),  # Cap test timeout at 30s
+            timeout=30,  # Command timeout capped at 30s
         )
         success = proc.returncode == 0
         return {
@@ -1057,12 +1057,13 @@ def _test_recovery(form: dict) -> dict:
             "latency_ms": int((time.monotonic() - started) * 1000),
             "output": proc.stdout[:500] if proc.stdout else "",
             "error": proc.stderr[:500] if proc.stderr else "",
+            "cool_down_seconds": cool_down_seconds,
         }
     except subprocess.TimeoutExpired:
         return {
             "ok": False,
             "latency_ms": int((time.monotonic() - started) * 1000),
-            "error": f"Command timed out after 30s (configured: {timeout_seconds}s)",
+            "error": "Command timed out after 30s",
         }
     except FileNotFoundError as e:
         return {

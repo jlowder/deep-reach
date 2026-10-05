@@ -180,7 +180,7 @@ export type SearchTool = "tavily" | "searxng";
 
 export interface SearchRecoverySettings {
   retry_count: number;
-  timeout_seconds: number;
+  cool_down_seconds: number;
   command: string;
 }
 
@@ -219,7 +219,7 @@ export interface SaveSettingsPayload {
   llm?: { endpoint?: string; model?: string; thinking?: boolean };
   search?: { tool?: SearchTool; searxng_url?: string; throttle_ms?: number };
   embeddings?: { endpoint?: string; model?: string };
-  search_recovery?: { retry_count?: number; timeout_seconds?: number; command?: string };
+  search_recovery?: { retry_count?: number; cool_down_seconds?: number; command?: string };
   keys?: { llm?: string; tavily?: string; embedding?: string };
 }
 
@@ -236,7 +236,7 @@ export interface TestSettingPayload {
   llm?: { endpoint?: string; model?: string; thinking?: boolean; key?: string };
   search?: { tool?: SearchTool; searxng_url?: string; throttle_ms?: number; key?: string };
   embedding?: { endpoint?: string; model?: string; key?: string };
-  recovery?: { command?: string; retry_count?: number; timeout_seconds?: number };
+  recovery?: { command?: string; retry_count?: number; cool_down_seconds?: number };
 }
 
 /** POST /settings/test response: ok + a per-target proof, or verbatim error. */

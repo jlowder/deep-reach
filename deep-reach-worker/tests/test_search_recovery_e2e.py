@@ -27,7 +27,7 @@ class TestSearchRecoveryEndToEnd:
         var_env = tmp_path / "var.env"
         var_env.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
 SEARCH_RECOVERY_RETRY_COUNT=3
-SEARCH_RECOVERY_TIMEOUT_SECONDS=900
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=900
 SEARCH_RECOVERY_COMMAND=docker restart searxng
 """)
         
@@ -36,7 +36,7 @@ SEARCH_RECOVERY_COMMAND=docker restart searxng
         # Step 2: Verify var.env contains the values
         parsed = settings_mod.read_var_env(var_env)
         assert parsed["SEARCH_RECOVERY_RETRY_COUNT"] == "3"
-        assert parsed["SEARCH_RECOVERY_TIMEOUT_SECONDS"] == "900"
+        assert parsed["SEARCH_RECOVERY_COOL_DOWN_SECONDS"] == "900"
         assert parsed["SEARCH_RECOVERY_COMMAND"] == "docker restart searxng"
         
         # Step 3: Hot-apply (push to os.environ + reset Config)
@@ -53,13 +53,13 @@ SEARCH_RECOVERY_COMMAND=docker restart searxng
         # Step 4: Verify Config singleton has the values
         cfg = config_mod.get_config()
         assert cfg.search_recovery_retry_count == 3
-        assert cfg.search_recovery_timeout_seconds == 900
+        assert cfg.search_recovery_cool_down_seconds == 900
         assert cfg.search_recovery_command == "docker restart searxng"
         
         # Step 5: Verify orchestrator can read them
         recovery_cfg = orch_mod._get_search_recovery_config()
         assert recovery_cfg["retry_count"] == 3
-        assert recovery_cfg["timeout_seconds"] == 900
+        assert recovery_cfg["cool_down_seconds"] == 900
         assert recovery_cfg["command"] == "docker restart searxng"
 
     def test_full_chain_with_different_values(self, tmp_path, monkeypatch):
@@ -69,7 +69,7 @@ SEARCH_RECOVERY_COMMAND=docker restart searxng
         var_env = tmp_path / "var.env"
         var_env.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
 SEARCH_RECOVERY_RETRY_COUNT=5
-SEARCH_RECOVERY_TIMEOUT_SECONDS=1800
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=1800
 SEARCH_RECOVERY_COMMAND=systemctl restart my-search-service
 """)
         
@@ -88,12 +88,12 @@ SEARCH_RECOVERY_COMMAND=systemctl restart my-search-service
         
         # Verify all values propagated through the chain
         assert cfg.search_recovery_retry_count == 5  # max allowed
-        assert cfg.search_recovery_timeout_seconds == 1800  # 30 minutes
+        assert cfg.search_recovery_cool_down_seconds == 1800  # 30 minutes
         assert cfg.search_recovery_command == "systemctl restart my-search-service"
         
         recovery_cfg = orch_mod._get_search_recovery_config()
         assert recovery_cfg["retry_count"] == 5
-        assert recovery_cfg["timeout_seconds"] == 1800
+        assert recovery_cfg["cool_down_seconds"] == 1800
         assert recovery_cfg["command"] == "systemctl restart my-search-service"
 
     def test_full_chain_empty_command(self, tmp_path, monkeypatch):
@@ -103,7 +103,7 @@ SEARCH_RECOVERY_COMMAND=systemctl restart my-search-service
         var_env = tmp_path / "var.env"
         var_env.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
 SEARCH_RECOVERY_RETRY_COUNT=3
-SEARCH_RECOVERY_TIMEOUT_SECONDS=600
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=600
 SEARCH_RECOVERY_COMMAND=
 """)
         
@@ -120,12 +120,12 @@ SEARCH_RECOVERY_COMMAND=
         cfg = config_mod.get_config()
         
         assert cfg.search_recovery_retry_count == 3
-        assert cfg.search_recovery_timeout_seconds == 600
+        assert cfg.search_recovery_cool_down_seconds == 600
         assert cfg.search_recovery_command == ""  # Empty = no recovery command
         
         recovery_cfg = orch_mod._get_search_recovery_config()
         assert recovery_cfg["retry_count"] == 3
-        assert recovery_cfg["timeout_seconds"] == 600
+        assert recovery_cfg["cool_down_seconds"] == 600
         assert recovery_cfg["command"] == ""  # Empty means recovery won't execute
 
     def test_orchestrator_would_use_values_in_retry_loop(self, tmp_path, monkeypatch):
@@ -143,7 +143,7 @@ SEARCH_RECOVERY_COMMAND=
         var_env = tmp_path / "var.env"
         var_env.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
 SEARCH_RECOVERY_RETRY_COUNT=4
-SEARCH_RECOVERY_TIMEOUT_SECONDS=120
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=120
 SEARCH_RECOVERY_COMMAND=fake_recovery_command
 """)
         
@@ -158,7 +158,7 @@ SEARCH_RECOVERY_COMMAND=fake_recovery_command
         # Get what the orchestrator would use
         recovery_cfg = orch_mod._get_search_recovery_config()
         retry_count = recovery_cfg["retry_count"]
-        timeout_seconds = recovery_cfg["timeout_seconds"]
+        cool_down_seconds = recovery_cfg["cool_down_seconds"]
         command = recovery_cfg["command"]
         
         # Simulate the retry loop logic
@@ -180,7 +180,7 @@ SEARCH_RECOVERY_COMMAND=fake_recovery_command
         # These values exceed the allowed range
         var_env.write_text("""LLM_ENDPOINT=http://localhost:8080/v1
 SEARCH_RECOVERY_RETRY_COUNT=10
-SEARCH_RECOVERY_TIMEOUT_SECONDS=10000
+SEARCH_RECOVERY_COOL_DOWN_SECONDS=10000
 SEARCH_RECOVERY_COMMAND=test
 """)
         
@@ -195,12 +195,12 @@ SEARCH_RECOVERY_COMMAND=test
         
         # Verify values are clamped in Config
         assert cfg.search_recovery_retry_count == 5  # max
-        assert cfg.search_recovery_timeout_seconds == 3600  # max
+        assert cfg.search_recovery_cool_down_seconds == 3600  # max
         
         # Verify orchestrator sees clamped values
         recovery_cfg = orch_mod._get_search_recovery_config()
         assert recovery_cfg["retry_count"] == 5
-        assert recovery_cfg["timeout_seconds"] == 3600
+        assert recovery_cfg["cool_down_seconds"] == 3600
 
     def test_default_chain_when_vars_unset(self, tmp_path, monkeypatch):
         """
@@ -225,10 +225,10 @@ SEARCH_RECOVERY_COMMAND=test
         
         # Verify defaults
         assert cfg.search_recovery_retry_count == 1
-        assert cfg.search_recovery_timeout_seconds == 600
+        assert cfg.search_recovery_cool_down_seconds == 600
         assert cfg.search_recovery_command is None
         
         recovery_cfg = orch_mod._get_search_recovery_config()
         assert recovery_cfg["retry_count"] == 1
-        assert recovery_cfg["timeout_seconds"] == 600
+        assert recovery_cfg["cool_down_seconds"] == 600
         assert recovery_cfg["command"] == ""

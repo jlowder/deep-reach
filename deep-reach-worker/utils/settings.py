@@ -35,7 +35,7 @@ NON_SECRET_VARS = (
     "SEARXNG_URL",
     "SEARCH_THROTTLE_MS",
     "SEARCH_RECOVERY_RETRY_COUNT",
-    "SEARCH_RECOVERY_TIMEOUT_SECONDS",
+    "SEARCH_RECOVERY_COOL_DOWN_SECONDS",
     "SEARCH_RECOVERY_COMMAND",
     "EMBEDDING_ENDPOINT",
     "EMBEDDING_MODEL",
@@ -338,11 +338,11 @@ def settings_view(path: Optional[Path] = None) -> dict:
     except ValueError:
         retry_count = 1
 
-    timeout_raw = eff.get("SEARCH_RECOVERY_TIMEOUT_SECONDS") or "600"
+    cool_down_raw = eff.get("SEARCH_RECOVERY_COOL_DOWN_SECONDS") or "60"
     try:
-        timeout_seconds = max(1, min(3600, int(timeout_raw)))
+        cool_down_seconds = max(1, min(7200, int(cool_down_raw)))
     except ValueError:
-        timeout_seconds = 600
+        cool_down_seconds = 60
 
     return {
         "llm": {
@@ -364,7 +364,7 @@ def settings_view(path: Optional[Path] = None) -> dict:
         },
         "search_recovery": {
             "retry_count": retry_count,
-            "timeout_seconds": timeout_seconds,
+            "cool_down_seconds": cool_down_seconds,
             "command": eff.get("SEARCH_RECOVERY_COMMAND") or "",
         },
         "keyring": {"available": avail, "backend": backend},

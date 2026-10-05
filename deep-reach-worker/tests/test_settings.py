@@ -650,7 +650,7 @@ class TestSearchRecoverySettings:
         assert "search_recovery" in data
         assert data["search_recovery"] == {
             "retry_count": 1,
-            "timeout_seconds": 600,
+            "cool_down_seconds": 600,
             "command": "",
         }
 
@@ -660,7 +660,7 @@ class TestSearchRecoverySettings:
         r = c.put("/settings", json={
             "search_recovery": {
                 "retry_count": 3,
-                "timeout_seconds": 300,
+                "cool_down_seconds": 300,
                 "command": "systemctl restart searxng",
             }
         })
@@ -668,13 +668,13 @@ class TestSearchRecoverySettings:
         data = r.json()
         assert data["search_recovery"] == {
             "retry_count": 3,
-            "timeout_seconds": 300,
+            "cool_down_seconds": 300,
             "command": "systemctl restart searxng",
         }
         # Verify file was updated
         file = s.read_var_env()
         assert file["SEARCH_RECOVERY_RETRY_COUNT"] == "3"
-        assert file["SEARCH_RECOVERY_TIMEOUT_SECONDS"] == "300"
+        assert file["SEARCH_RECOVERY_COOL_DOWN_SECONDS"] == "300"
         assert file["SEARCH_RECOVERY_COMMAND"] == "systemctl restart searxng"
 
     def test_get_returns_saved_search_recovery(self):
@@ -683,14 +683,14 @@ class TestSearchRecoverySettings:
         c.put("/settings", json={
             "search_recovery": {
                 "retry_count": 2,
-                "timeout_seconds": 900,
+                "cool_down_seconds": 900,
                 "command": "sudo -u searxng searxng update",
             }
         })
         data = c.get("/settings").json()
         assert data["search_recovery"] == {
             "retry_count": 2,
-            "timeout_seconds": 900,
+            "cool_down_seconds": 900,
             "command": "sudo -u searxng searxng update",
         }
 
@@ -710,18 +710,18 @@ class TestSearchRecoverySettings:
         assert r.status_code == 200
         assert r.json()["search_recovery"]["retry_count"] == 1
 
-    def test_validation_timeout_seconds_bounds(self):
-        """timeout_seconds is clamped to 1-3600 range."""
+    def test_validation_cool_down_seconds_bounds(self):
+        """cool_down_seconds is clamped to 1-3600 range."""
         c = make_app()
         # Below minimum
-        r = c.put("/settings", json={"search_recovery": {"timeout_seconds": 0}})
+        r = c.put("/settings", json={"search_recovery": {"cool_down_seconds": 0}})
         assert r.status_code == 200
-        assert r.json()["search_recovery"]["timeout_seconds"] == 1
+        assert r.json()["search_recovery"]["cool_down_seconds"] == 1
         # Above maximum
-        r = c.put("/settings", json={"search_recovery": {"timeout_seconds": 7200}})
+        r = c.put("/settings", json={"search_recovery": {"cool_down_seconds": 7200}})
         assert r.status_code == 200
-        assert r.json()["search_recovery"]["timeout_seconds"] == 3600
+        assert r.json()["search_recovery"]["cool_down_seconds"] == 3600
         # Invalid input
-        r = c.put("/settings", json={"search_recovery": {"timeout_seconds": "slow"}})
+        r = c.put("/settings", json={"search_recovery": {"cool_down_seconds": "slow"}})
         assert r.status_code == 200
-        assert r.json()["search_recovery"]["timeout_seconds"] == 600
+        assert r.json()["search_recovery"]["cool_down_seconds"] == 600

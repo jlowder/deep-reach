@@ -114,7 +114,8 @@ def _run_recovery_command(
 def _get_search_recovery_config() -> Dict[str, Any]:
     """Read search recovery settings from config.
     
-    Returns {"retry_count": int, "timeout_seconds": int, "command": str}.
+    Returns {"retry_count": int, "cool_down_seconds": int, "command": str}.
+    The flow is: run recovery command → wait cool_down → retry search → stop on success.
     """
     try:
         config = get_config()
@@ -124,20 +125,20 @@ def _get_search_recovery_config() -> Dict[str, Any]:
         except (ValueError, TypeError):
             retry_count = 1
 
-        timeout_raw = getattr(config, "search_recovery_timeout_seconds", "600")
+        cool_down_raw = getattr(config, "search_recovery_cool_down_seconds", "60")
         try:
-            timeout_seconds = max(1, min(3600, int(timeout_raw)))
+            cool_down_seconds = max(1, min(7200, int(cool_down_raw)))
         except (ValueError, TypeError):
-            timeout_seconds = 600
+            cool_down_seconds = 60
 
         command = getattr(config, "search_recovery_command", "") or ""
         return {
             "retry_count": retry_count,
-            "timeout_seconds": timeout_seconds,
+            "cool_down_seconds": cool_down_seconds,
             "command": command.strip(),
         }
     except Exception:
-        return {"retry_count": 1, "timeout_seconds": 600, "command": ""}
+        return {"retry_count": 1, "cool_down_seconds": 60, "command": ""}
 
 # Global LLM call budget for one deep-research run (plan B / P2-3 ≈ 40).
 # Worst-case tracked calls ≈ 45: decompose(1) + sufficiency/investigation
@@ -1005,18 +1006,20 @@ def deep_research(
             state["sub_question_evidence"][sq_id] = packs[sq_id]
             
             # Search recovery: retry with user-configured command on zero-evidence.
+            # Flow: run recovery command → wait cool_down → retry search → stop on success
             if evidence_pack_empty(pack_dict):
                 recovery_cfg = _get_search_recovery_config()
                 retry_count = recovery_cfg["retry_count"]
-                timeout_seconds = recovery_cfg["timeout_seconds"]
+                cool_down_seconds = recovery_cfg["cool_down_seconds"]
                 recovery_command = recovery_cfg["command"]
                 
                 if retry_count > 0:
                     recovered = False
                     for attempt in range(1, retry_count + 1):
+                        # Step 1: Run recovery command (if configured)
                         if recovery_command:
                             cmd_result = _run_recovery_command(
-                                recovery_command, timeout_seconds
+                                recovery_command, 30  # Command timeout capped at 30s
                             )
                             if verbose:
                                 print(
@@ -1026,7 +1029,11 @@ def deep_research(
                             if cmd_result["output"]:
                                 print(f"[DEEP] Recovery output: {cmd_result['output'][:200]}")
                         
-                        # Re-run the search for this sub-question
+                        # Step 2: Wait for cool-down period (blocking)
+                        if cool_down_seconds > 0:
+                            time.sleep(cool_down_seconds)
+                        
+                        # Step 3: Re-run the search for this sub-question
                         if verbose:
                             print(
                                 f"[DEEP] Retrying search for {sq_id} "
@@ -1045,6 +1052,7 @@ def deep_research(
                         )
                         pack_dict_retry = pack_retry.model_dump()
                         
+                        # Step 4: Stop immediately if evidence found
                         if not evidence_pack_empty(pack_dict_retry):
                             pack_dict = pack_dict_retry
                             recovered = True
