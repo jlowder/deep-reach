@@ -269,7 +269,7 @@ function StepLog({
     <div
       ref={boxRef}
       aria-hidden="true"
-      className="max-h-[40vh] overflow-y-auto border-t border-hairline pt-3"
+      className="flex-1 overflow-y-auto border-t border-hairline pt-3"
     >
       <ol className="flex flex-col gap-1">
         {steps.map((s, i) => (
