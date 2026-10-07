@@ -62,7 +62,7 @@ export function TaskDetail({ task, summary, queuePosition, updateError, onDelete
   return (
     <section
       aria-label={`Task: ${base.topic}`}
-      className="flex min-w-0 animate-fade-up flex-col gap-5"
+      className="flex min-w-0 animate-fade-up flex-col gap-4 h-[calc(100vh-8rem)]"
     >
       <div className="flex flex-wrap items-center gap-3">
         <h2 className="font-display text-[22px] font-semibold leading-tight">
@@ -107,6 +107,8 @@ export function TaskDetail({ task, summary, queuePosition, updateError, onDelete
         </p>
       )}
 
+      <div className="flex flex-col gap-4 flex-1 overflow-auto">
+
       {status === "running" && last && (
         <p aria-live="polite" className="max-w-[720px] font-mono text-[12px] text-dim">
           ▸ {last.detail} · {fmtClock(last.ts)}
@@ -136,23 +138,6 @@ export function TaskDetail({ task, summary, queuePosition, updateError, onDelete
               {task.stats.revisions === 1 ? "" : "s"} · {task.stats.wall_s.toFixed(0)}s wall
             </p>
           )}
-          <div className="flex flex-wrap items-center gap-3">
-            <ActionButton
-              label="Download PDF"
-              onClick={() => {
-                window.location.href = api.downloadUrl(id, "pdf");
-              }}
-            />
-            <ActionButton
-              label="Download HTML"
-              onClick={() => {
-                window.location.href = api.downloadUrl(id, "html");
-              }}
-            />
-            <div className="ml-auto">
-              <DeleteButton onClick={() => onDelete(id)} />
-            </div>
-          </div>
         </>
       )}
 
@@ -164,9 +149,6 @@ export function TaskDetail({ task, summary, queuePosition, updateError, onDelete
           >
             {base.error || "unknown error"}
           </div>
-          <div>
-            <DeleteButton onClick={() => onDelete(id)} />
-          </div>
         </>
       )}
 
@@ -175,7 +157,35 @@ export function TaskDetail({ task, summary, queuePosition, updateError, onDelete
           docs: {docs.join(", ")}
         </p>
       )}
-    </section>
+    </div>
+
+    {/* Download buttons and delete - sticky footer */}
+    {status === "completed" && (
+      <div className="flex flex-wrap items-center gap-3 mt-auto">
+        <ActionButton
+          label="Download PDF"
+          onClick={() => {
+            window.location.href = api.downloadUrl(id, "pdf");
+          }}
+        />
+        <ActionButton
+          label="Download HTML"
+          onClick={() => {
+            window.location.href = api.downloadUrl(id, "html");
+          }}
+        />
+        <div className="ml-auto">
+          <DeleteButton onClick={() => onDelete(id)} />
+        </div>
+      </div>
+    )}
+
+    {status === "failed" && (
+      <div className="mt-auto">
+        <DeleteButton onClick={() => onDelete(id)} />
+      </div>
+    )}
+  </section>
   );
 }
 
@@ -259,7 +269,7 @@ function StepLog({
     <div
       ref={boxRef}
       aria-hidden="true"
-      className="max-h-[40vh] overflow-y-auto border-t border-hairline pt-3"
+      className="flex-1 overflow-y-auto border-t border-hairline pt-3"
     >
       <ol className="flex flex-col gap-1">
         {steps.map((s, i) => (
