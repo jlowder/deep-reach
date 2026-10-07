@@ -1216,6 +1216,12 @@ def deep_research(
                     endpoint=endpoint,
                     api_key=api_key,
                 )
+                # Notify: gap analysis summary
+                per_section = critic.get("per_section") or []
+                gap_sections = [v for v in per_section if not (v.get("grounded", True) and v.get("depth_ok", True) and v.get("citation_density_ok", True))]
+                total_gaps = sum(len(v.get("gaps") or []) for v in gap_sections)
+                if verbose:
+                    print(f"[DEEP] critic gap analysis: {total_gaps} gap(s) across {len(gap_sections)} section(s)")
             else:
                 print(
                     "[DEEP] WARNING: LLM budget exhausted before the critic; "
@@ -1238,6 +1244,7 @@ def deep_research(
                 combined_goal = " ".join(
                     q.strip() for q in critic["specific_queries"] if q and q.strip()
                 )
+                _notify_stage(4, f"critic: re-retrieval triggered — {combined_goal[:100]}")
                 if verbose:
                     print(f"[DEEP] re-retrieval: {combined_goal[:120]}")
                 rr_pack = retriever_agent(
@@ -1323,10 +1330,15 @@ def deep_research(
                     continue
                 revision_queue.append((index, sid, gaps))
                 queued.add(sid)
+            # Add must-revise sections
             for index, (sid, _h, _t) in enumerate(sections):
                 if sid in must_revise and sid not in queued:
                     revision_queue.append((index, sid, [MUST_REVISE_GAP]))
                     queued.add(sid)
+
+            # Notify: revision queue size
+            if revision_queue:
+                _notify_stage(4, f"critic: revision queue — {len(revision_queue)} section(s) need improvement")
 
             if revision_queue:
                 rev_counts: Dict[str, int] = {}
@@ -1371,6 +1383,7 @@ def deep_research(
                         f"Angle: {sub_question.get('angle') or 'n/a'}."
                     )
                     try:
+                        _notify_stage(4, f"critic: revising '{heading}' — {len(gaps)} gap(s)")
                         new_text = write_section(
                             user_query,
                             outline_text,
@@ -1404,12 +1417,14 @@ def deep_research(
                     sections[index] = (sid, heading, new_text)
                     stats["revisions"] += 1
                     rev_counts[sid] = rev_counts.get(sid, 0) + 1
+        # Final critic summary notification
         critic_extra = (
             f"revisions={stats['revisions']} re_retrieves={stats['re_retrieves']} "
             f"source={critic.get('source') if critic else 'skipped'}"
         )
         if stats["section_failures"]:
             critic_extra += f" section_failures={stats['section_failures']}"
+        _notify_stage(4, f"critic: complete — {stats['revisions']} revision(s), {stats['re_retrieves']} re-retrieved")
         _log_stage("4 CRITIC", critic_extra)
 
         # ------------------------------------------------------------------
