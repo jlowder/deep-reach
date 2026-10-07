@@ -16,6 +16,7 @@ export interface TaskStats {
   wall_s: number;
   sections: number;
   revisions: number;
+  web_searches: number;
 }
 
 export interface TaskLinks {

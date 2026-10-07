@@ -29,6 +29,20 @@ from typing import Any, Dict, Optional
 
 import requests
 
+# Web search counter for stats tracking
+_web_search_count: int = 0
+
+
+def reset_web_search_count() -> None:
+    """Reset the web search counter (call at the start of each research run)."""
+    global _web_search_count
+    _web_search_count = 0
+
+
+def get_web_search_count() -> int:
+    """Return the current web search count."""
+    return _web_search_count
+
 # Import utils.config first: its module-level code loads var.env via
 # load_dotenv, so env reads below see the real configuration.
 import utils.config  # noqa: F401
@@ -298,6 +312,8 @@ def web_search(query: str, num_results: int = 5) -> Dict[str, Any]:
     results on error and never retries (retrying a throttled engine makes
     it worse; pacing is the fix).
     """
+    global _web_search_count
+    _web_search_count += 1
     pace_next_query()
     out = get_search_tool().search(query, num_results)
     if out.get("results"):
