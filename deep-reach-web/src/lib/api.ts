@@ -200,6 +200,11 @@ export function normalizeSettings(raw: unknown): Settings {
       model: str(emb.model),
       key: key(emb.key),
     },
+    search_recovery: {
+      retry_count: num(isRecord(r.search_recovery) ? r.search_recovery.retry_count : 1),
+      cool_down_seconds: num(isRecord(r.search_recovery) ? r.search_recovery.cool_down_seconds : 60),
+      command: str(isRecord(r.search_recovery) ? r.search_recovery.command : ""),
+    },
     keyring: {
       available: typeof kr.available === "boolean" ? kr.available : false,
       backend: typeof kr.backend === "string" && kr.backend ? kr.backend : null,

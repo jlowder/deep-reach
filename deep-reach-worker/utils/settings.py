@@ -34,6 +34,9 @@ NON_SECRET_VARS = (
     "SEARCH_TOOL",
     "SEARXNG_URL",
     "SEARCH_THROTTLE_MS",
+    "SEARCH_RECOVERY_RETRY_COUNT",
+    "SEARCH_RECOVERY_COOL_DOWN_SECONDS",
+    "SEARCH_RECOVERY_COMMAND",
     "EMBEDDING_ENDPOINT",
     "EMBEDDING_MODEL",
 )
@@ -329,6 +332,18 @@ def settings_view(path: Optional[Path] = None) -> dict:
     except ValueError:
         throttle = 1000
 
+    retry_raw = eff.get("SEARCH_RECOVERY_RETRY_COUNT") or "1"
+    try:
+        retry_count = max(0, min(5, int(retry_raw)))
+    except ValueError:
+        retry_count = 1
+
+    cool_down_raw = eff.get("SEARCH_RECOVERY_COOL_DOWN_SECONDS") or "60"
+    try:
+        cool_down_seconds = max(1, min(7200, int(cool_down_raw)))
+    except ValueError:
+        cool_down_seconds = 60
+
     return {
         "llm": {
             "endpoint": eff.get("LLM_ENDPOINT"),
@@ -346,6 +361,11 @@ def settings_view(path: Optional[Path] = None) -> dict:
             "endpoint": eff.get("EMBEDDING_ENDPOINT"),
             "model": eff.get("EMBEDDING_MODEL"),
             "key": key_info("embedding-api-key"),
+        },
+        "search_recovery": {
+            "retry_count": retry_count,
+            "cool_down_seconds": cool_down_seconds,
+            "command": eff.get("SEARCH_RECOVERY_COMMAND") or "",
         },
         "keyring": {"available": avail, "backend": backend},
         "requires_restart": _requires_restart(eff),

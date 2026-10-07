@@ -260,11 +260,12 @@ The web settings dialog talks to this service through the unified API glue. Non-
   "llm": {"endpoint": "http://localhost:8080/v1", "model": "Some-Other-Model", "thinking": false},
   "search": {"tool": "searxng", "searxng_url": "http://localhost:8081", "throttle_ms": 1000},
   "embeddings": {"endpoint": "http://localhost:8080/v1", "model": "nomicai-modernbert-embed-base-bf16"},
+  "search_recovery": {"retry_count": 1, "timeout_seconds": 600, "command": "systemctl restart searxng"},
   "keys": {"llm": "new-or-empty-string", "tavily": "", "embedding": "keep-current"}
 }
 ```
 
-Rules: any field/section absent = keep current; a key `""` = **delete** the key (keyring + var.env line); validation — `tool` ∈ {tavily, searxng}, `throttle_ms` int 0..5000, endpoints must be http(s) URLs, models non-empty, `thinking` boolean. A key that must be stored with no keyring backend available → 503 naming the environment variable. 200 response = the GET shape + `{"applied": true, "errors": []}`; `requires_restart` reflects the post-save state (embeddings changes surface here).
+Rules: any field/section absent = keep current; a key `""` = **delete** the key (keyring + var.env line); validation — `tool` ∈ {tavily, searxng}, `throttle_ms` int 0..5000, `retry_count` int 0..5 (default 1), `timeout_seconds` int 1..3600 (default 600), endpoints must be http(s) URLs, models non-empty, `thinking` boolean. A key that must be stored with no keyring backend available → 503 naming the environment variable. 200 response = the GET shape + `{"applied": true, "errors": []}`; `requires_restart` reflects the post-save state (embeddings changes surface here).
 
 ### POST /settings/test
 

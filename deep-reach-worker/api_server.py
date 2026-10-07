@@ -740,6 +740,10 @@ def create_app(
         for field, var in (("endpoint", "EMBEDDING_ENDPOINT"), ("model", "EMBEDDING_MODEL")):
             if field in emb:
                 non_secret[var] = str(emb[field])
+        search_recovery = payload.get("search_recovery") or {}
+        for field, var in (("retry_count", "SEARCH_RECOVERY_RETRY_COUNT"), ("cool_down_seconds", "SEARCH_RECOVERY_COOL_DOWN_SECONDS"), ("command", "SEARCH_RECOVERY_COMMAND")):
+            if field in search_recovery:
+                non_secret[var] = str(search_recovery[field])
 
         keys = payload.get("keys") or {}
         key_map = {"llm": "llm-api-key", "tavily": "tavily-api-key", "embedding": "embedding-api-key"}
@@ -773,8 +777,8 @@ def create_app(
         if not isinstance(payload, dict):
             return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
         target = payload.get("target")
-        if target not in ("llm", "search", "embedding"):
-            return JSONResponse({"error": "target must be 'llm', 'search' or 'embedding'"}, status_code=400)
+        if target not in ("llm", "search", "embedding", "recovery"):
+            return JSONResponse({"error": "target must be 'llm', 'search', 'embedding' or 'recovery'"}, status_code=400)
         form = payload.get(target)
         if form is None:
             form = {}
@@ -785,6 +789,10 @@ def create_app(
             return _test_llm(form, eff)
         if target == "search":
             return _test_search(form, eff)
+        if target == "embedding":
+            return _test_embedding(form, eff)
+        if target == "recovery":
+            return _test_recovery(form)
         return _test_embedding(form, eff)
 
     return app
@@ -866,6 +874,18 @@ def _validate_settings_payload(payload: dict) -> list:
     if "model" in emb and (not isinstance(emb["model"], str) or not emb["model"].strip()):
         details.append("embeddings.model must be a non-empty string")
 
+    search_recovery = section("search_recovery")
+    if "retry_count" in search_recovery:
+        rc = search_recovery["retry_count"]
+        if isinstance(rc, bool) or not isinstance(rc, int) or not 0 <= rc <= 5:
+            details.append("search_recovery.retry_count must be an integer between 0 and 5")
+    if "cool_down_seconds" in search_recovery:
+        ts = search_recovery["cool_down_seconds"]
+        if isinstance(ts, bool) or not isinstance(ts, int) or not 1 <= ts <= 7200:
+            details.append("search_recovery.cool_down_seconds must be an integer between 1 and 7200")
+    if "command" in search_recovery and not isinstance(search_recovery["command"], str):
+        details.append("search_recovery.command must be a string")
+
     keys = payload.get("keys")
     if keys is not None and not isinstance(keys, dict):
         details.append("keys must be an object")
@@ -876,8 +896,8 @@ def _validate_settings_payload(payload: dict) -> list:
         elif not isinstance(value, str):
             details.append(f"keys.{name} must be a string (empty string deletes)")
 
-    if not any(payload.get(k) for k in ("llm", "search", "embeddings", "keys")):
-        details.append("nothing to update — provide llm, search, embeddings and/or keys")
+    if not any(payload.get(k) for k in ("llm", "search", "embeddings", "search_recovery", "keys")):
+        details.append("nothing to update — provide llm, search, embeddings, search_recovery and/or keys")
     return details
 
 
@@ -1000,6 +1020,57 @@ def _test_embedding(form: dict, eff: dict) -> dict:
             }
         finally:
             client.close()
+    except Exception as e:
+        return {
+            "ok": False,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "error": f"{type(e).__name__}: {e}",
+        }
+
+
+def _test_recovery(form: dict) -> dict:
+    """Test a recovery command execution (target='recovery')."""
+    import subprocess
+
+    command = form.get("command") or ""
+    if not command:
+        return {
+            "ok": False,
+            "error": "recovery.command must be set to test the command execution",
+        }
+    
+    retry_count = int(form.get("retry_count") or 1)
+    cool_down_seconds = int(form.get("cool_down_seconds") or 60)
+    
+    started = time.monotonic()
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=30,  # Command timeout capped at 30s
+        )
+        success = proc.returncode == 0
+        return {
+            "ok": success,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "output": proc.stdout[:500] if proc.stdout else "",
+            "error": proc.stderr[:500] if proc.stderr else "",
+            "cool_down_seconds": cool_down_seconds,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "error": "Command timed out after 30s",
+        }
+    except FileNotFoundError as e:
+        return {
+            "ok": False,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "error": f"Command not found: {e}",
+        }
     except Exception as e:
         return {
             "ok": False,
