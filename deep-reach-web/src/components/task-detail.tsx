@@ -133,7 +133,8 @@ export function TaskDetail({ task, summary, queuePosition, updateError, onDelete
         <>
           {task?.stats && (
             <p className="font-mono text-[11px] text-dim">
-              {task.stats.llm_calls} llm calls · {task.stats.sections} section
+              {task.stats.llm_calls} llm calls · {task.stats.web_searches} web search
+              {task.stats.web_searches === 1 ? "" : "s"} · {task.stats.sections} section
               {task.stats.sections === 1 ? "" : "s"} · {task.stats.revisions} revision
               {task.stats.revisions === 1 ? "" : "s"} · {task.stats.wall_s.toFixed(0)}s wall
             </p>

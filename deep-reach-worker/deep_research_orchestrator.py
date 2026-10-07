@@ -66,6 +66,7 @@ from worker_agents.writer_agent import (
     write_synthesis,
 )
 from utils.config import get_config
+from utils.search import get_web_search_count, reset_web_search_count
 from deep_research_structured import (
     EXEC_SUMMARY_JSON_INSTRUCTIONS,
     assemble_structured_report,
@@ -688,6 +689,8 @@ def deep_research(
         question packs, citation registry/maps, sections, critic report).
     """
     started = time.time()
+    # Reset web search counter at the start of each research run
+    reset_web_search_count()
     output_format = "markdown" if output_format not in ("markdown", "json") else output_format
     if session_id is None:
         session_id = str(uuid4())
@@ -700,6 +703,7 @@ def deep_research(
         "re_retrieves": 0,
         "section_failures": 0,
         "exec_summary_failed": False,
+        "web_searches": 0,
         "cache_hits": 0,
         "cache_misses": 0,
         "synthesis_words": 0,
@@ -779,6 +783,7 @@ def deep_research(
         stats["llm_calls"] = budget.count
         stats["wall_s"] = round(time.time() - started, 1)
         stats["sections"] = len(sections)
+        stats["web_searches"] = get_web_search_count()
         stats["last_llm_error"] = _model_runner.last_llm_error
         # Per-call usage/finish_reason log for THIS run (dropped-oldest
         # bounded; one entry per run_model call, stage = agent label).

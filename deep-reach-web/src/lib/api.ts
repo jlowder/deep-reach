@@ -113,6 +113,7 @@ function statsOf(v: unknown): TaskStats | null {
     wall_s: num(v.wall_s),
     sections: num(v.sections),
     revisions: num(v.revisions),
+    web_searches: num(v.web_searches),
   };
 }
 
