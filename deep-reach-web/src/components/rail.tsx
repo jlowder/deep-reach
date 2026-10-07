@@ -151,7 +151,7 @@ export function Rail({ queue, queueSyncedAt, queueSyncFailed, onCreated, onOpenS
 
   return (
     <aside className="border-b border-hairline bg-surface min-[960px]:border-b-0 min-[960px]:border-r">
-      <div className="flex h-full flex-col gap-6 p-5">
+      <div className="flex h-full flex-col gap-4 p-5">
         <div className="flex flex-col gap-1">
           <p className="font-display text-[15px] font-bold tracking-[0.18em]">
             DEEP <span className="text-accent">REACH</span>
@@ -175,7 +175,7 @@ export function Rail({ queue, queueSyncedAt, queueSyncFailed, onCreated, onOpenS
           </span>
         </button>
 
-        <div className={cx("flex-col gap-5", open ? "flex" : "hidden min-[960px]:flex")}>
+        <div className={cx("flex-col gap-4", open ? "flex" : "hidden min-[960px]:flex")}>
           <form
             className="flex flex-col gap-4"
             onSubmit={(e) => {
@@ -236,8 +236,20 @@ export function Rail({ queue, queueSyncedAt, queueSyncFailed, onCreated, onOpenS
               </label>
             </div>
 
+            <div className="mt-2 flex flex-col gap-1">
+              <div className="text-[10px] text-dim">
+                <span className="font-semibold">Max rounds</span> &mdash; Synthesis cycles (3–5)
+              </div>
+              <div className="text-[10px] text-dim">
+                <span className="font-semibold">Docs</span> &mdash; Uploaded documents to process (0–20)
+              </div>
+              <div className="text-[10px] text-dim">
+                <span className="font-semibold">Web</span> &mdash; Web search results to gather (0–10)
+              </div>
+            </div>
+
             <label
-              className="block cursor-pointer border border-dashed border-hairline px-3 py-4 text-center hover:bg-field"
+              className="block cursor-pointer border border-dashed border-hairline px-3 py-2.5 text-center hover:bg-field"
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
                 e.preventDefault();
@@ -258,14 +270,14 @@ export function Rail({ queue, queueSyncedAt, queueSyncFailed, onCreated, onOpenS
             </label>
 
             {chips.length > 0 && (
-              <div className="flex flex-col gap-1.5">
-                <ul className="flex flex-wrap gap-1.5">
+              <div className="flex flex-col gap-1">
+                <ul className="flex flex-wrap gap-1">
                   {chips.map((chip) => (
                     <li
                       key={chip.key}
                       title={chip.reason}
                       className={cx(
-                        "flex items-center gap-1.5 border px-2 py-1 font-mono text-[11px]",
+                        "flex items-center gap-1 border px-2 py-0.5 font-mono text-[11px]",
                         chip.state === "uploading" && "border-hairline bg-field text-dim",
                         chip.state === "staged" && "border-hairline bg-field",
                         chip.state === "error" && "border-err-hairline bg-err-soft text-err",
@@ -296,7 +308,7 @@ export function Rail({ queue, queueSyncedAt, queueSyncFailed, onCreated, onOpenS
             <button
               type="submit"
               disabled={creating || busy}
-              className="w-full rounded-none bg-accent py-2.5 font-display text-[12px] font-semibold uppercase tracking-[0.12em] text-field hover:shadow-[0_0_28px_var(--glow)] disabled:opacity-50"
+              className="w-full rounded-none bg-accent py-2 font-display text-[12px] font-semibold uppercase tracking-[0.12em] text-field hover:shadow-[0_0_28px_var(--glow)] disabled:opacity-50"
             >
               {creating ? "Starting…" : "Start research"}
             </button>
