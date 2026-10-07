@@ -241,7 +241,7 @@ export function Rail({ queue, queueSyncedAt, queueSyncFailed, onCreated, onOpenS
                 <span className="font-semibold">Max rounds</span> &mdash; Synthesis cycles (3–5)
               </div>
               <div className="text-[10px] text-dim">
-                <span className="font-semibold">Docs</span> &mdash; Uploaded documents to process (0–20)
+                <span className="font-semibold">Docs</span> &mdash; Document chunks to keep (sorted by relevance) (0–20)
               </div>
               <div className="text-[10px] text-dim">
                 <span className="font-semibold">Web</span> &mdash; Web search results to gather (0–10)
