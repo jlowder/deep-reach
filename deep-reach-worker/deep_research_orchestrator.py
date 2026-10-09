@@ -15,10 +15,9 @@ orchestrator (which stays untouched for cheap queries):
           → [5] ASSEMBLY (exec summary LAST + resolved references +
                 machine-side state for save_report)
 
-A global LLM call budget (MAX_LLM_CALLS) counts every run_model call made in
-the pipeline (decomposer, sufficiency, writers, critic, exec summary). When
-the budget is exhausted the pipeline stops issuing LLM calls and assembles
-the report from what exists (warning logged).
+An LLM call counter tracks every run_model call made in the pipeline
+(decomposer, sufficiency, writers, critic, exec summary) for stats/logging.
+The budget is unlimited — the pipeline runs every stage to completion.
 
 Standard mode (orchestrator_agent) is NOT modified.
 """
@@ -142,14 +141,6 @@ def _get_search_recovery_config() -> Dict[str, Any]:
         return {"retry_count": 1, "cool_down_seconds": 60, "command": ""}
 
 # Global LLM call budget for one deep-research run (plan B / P2-3 ≈ 40).
-# Worst-case tracked calls ≈ 45: decompose(1) + sufficiency/investigation
-# headroom + drafts(≤9) + critic(1) + revisions(≤8) + re-retrieval(≤2) +
-# synthesis(1) + exec summary(1). Degradation order on budget pressure:
-# the synthesis section is skipped BEFORE the executive summary is dropped
-# (the synthesis gate requires budget.can_afford(2), leaving room for the
-# exec summary).
-MAX_LLM_CALLS = 40
-
 # Revision caps (P1-4): per section and global expansion calls.
 # Defaults here; the runtime values come from get_config() so the settings
 # dialog can tune them. _revision_caps() resolves the current values.
@@ -177,28 +168,27 @@ class _BudgetExhausted(Exception):
 
 
 class _LLMBudget:
-    """Counts every run_model call made inside the deep pipeline."""
+    """Counts every run_model call made inside the deep pipeline.
 
-    def __init__(self, limit: int):
-        self.limit = max(int(limit), 1)
+    Budget is unlimited (limit=0): the LLM call budget check has been
+    removed — the pipeline now runs until it naturally completes each
+    stage. ``count`` is still tracked for stats/logging."""
+
+    def __init__(self):
+        self.limit = 0
         self.count = 0
 
     @property
     def exhausted(self) -> bool:
-        return self.count >= self.limit
+        return False
 
     def can_afford(self, n: int = 1) -> bool:
-        return self.count + n <= self.limit
+        return True
 
     def charge(self, label: str, verbose: bool = False) -> None:
-        if self.exhausted:
-            raise _BudgetExhausted(
-                f"LLM budget exhausted ({self.count}/{self.limit} calls) "
-                f"before {label}"
-            )
         self.count += 1
         if verbose:
-            print(f"[DEEP] LLM call {self.count}/{self.limit} ({label})")
+            print(f"[DEEP] LLM call {self.count} ({label})")
 
 
 # Per-symbol stacks of previously bound run_model implementations. The
@@ -662,7 +652,7 @@ def _shorten(text: Any, limit: int = 80) -> str:
 def deep_research(
     user_query: str,
     verbose: bool = True,
-    max_rounds: int = 3,
+    max_rounds: Optional[int] = None,
     budget_doc: int = 10,
     budget_web: int = 5,
     endpoint: Optional[str] = None,
@@ -678,7 +668,9 @@ def deep_research(
     Args:
         user_query: The user's research query.
         verbose: Print stage/retrieval/writer progress.
-        max_rounds: Max investigator rounds per sub-question (default 3).
+        max_rounds: Max investigator rounds per sub-question. If None (the
+            default), read from MAX_INVESTIGATION_ROUNDS env var / settings
+            dialog, fallback 3.
         budget_doc: Max doc chunks kept per sub-question (default 10).
         budget_web: Max web results kept per sub-question (default 5).
         endpoint: Optional custom endpoint URL for all agents.
@@ -711,7 +703,11 @@ def deep_research(
     output_format = "markdown" if output_format not in ("markdown", "json") else output_format
     if session_id is None:
         session_id = str(uuid4())
-    budget = _LLMBudget(MAX_LLM_CALLS)
+    # max_rounds: explicitly passed (API per-run param) wins; otherwise read
+    # from config (MAX_INVESTIGATION_ROUNDS env var / settings dialog).
+    if max_rounds is None:
+        max_rounds = get_config().max_investigation_rounds
+    budget = _LLMBudget()
     stats: Dict[str, Any] = {
         "llm_calls": 0,
         "wall_s": 0.0,
@@ -748,14 +744,14 @@ def deep_research(
     critic: Optional[dict] = None
 
     if verbose:
-        print(f"[DEEP] deep_research: '{user_query}' (budget {budget.limit} LLM calls)")
+        print(f"[DEEP] deep_research: '{user_query}' (LLM calls: unlimited)")
 
     def _log_stage(name: str, extra: str = "") -> None:
         stats["llm_calls"] = budget.count
         wall = time.time() - started
         print(
             f"[DEEP] stage {name} done: wall={wall:.1f}s "
-            f"llm_calls={budget.count}/{budget.limit} {extra}".rstrip()
+            f"llm_calls={budget.count} {extra}".rstrip()
         )
 
     def _notify_stage(stage_no: int, detail: str) -> None:

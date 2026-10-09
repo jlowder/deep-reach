@@ -45,6 +45,8 @@ interface FormState {
     max_follow_up_queries: number;
     chunk_content_max_chars: number;
     decomposer_subquestion_max: number;
+    max_investigation_rounds: number;
+    max_web_results_per_query: number;
   };
 }
 
@@ -80,6 +82,8 @@ function formFromSettings(s: Settings): FormState {
       max_follow_up_queries: s.pipeline_caps.max_follow_up_queries,
       chunk_content_max_chars: s.pipeline_caps.chunk_content_max_chars,
       decomposer_subquestion_max: s.pipeline_caps.decomposer_subquestion_max,
+      max_investigation_rounds: s.pipeline_caps.max_investigation_rounds,
+      max_web_results_per_query: s.pipeline_caps.max_web_results_per_query,
     },
   };
 }
@@ -488,6 +492,8 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
     if (pc.max_follow_up_queries !== spc.max_follow_up_queries) return true;
     if (pc.chunk_content_max_chars !== spc.chunk_content_max_chars) return true;
     if (pc.decomposer_subquestion_max !== spc.decomposer_subquestion_max) return true;
+    if (pc.max_investigation_rounds !== spc.max_investigation_rounds) return true;
+    if (pc.max_web_results_per_query !== spc.max_web_results_per_query) return true;
     return KEY_NAMES.some((n) => keyTouched[n]);
   }, [saved, form, keyTouched]);
 
@@ -539,6 +545,8 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
     if (fpc.max_follow_up_queries !== spc.max_follow_up_queries) pc.max_follow_up_queries = fpc.max_follow_up_queries;
     if (fpc.chunk_content_max_chars !== spc.chunk_content_max_chars) pc.chunk_content_max_chars = fpc.chunk_content_max_chars;
     if (fpc.decomposer_subquestion_max !== spc.decomposer_subquestion_max) pc.decomposer_subquestion_max = fpc.decomposer_subquestion_max;
+    if (fpc.max_investigation_rounds !== spc.max_investigation_rounds) pc.max_investigation_rounds = fpc.max_investigation_rounds;
+    if (fpc.max_web_results_per_query !== spc.max_web_results_per_query) pc.max_web_results_per_query = fpc.max_web_results_per_query;
     if (Object.keys(pc).length) p.pipeline_caps = pc;
     const keysPayload: Record<string, string> = {};
     for (const name of KEY_NAMES) if (keyTouched[name]) keysPayload[name] = keys[name];
@@ -1188,6 +1196,54 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
                       <p className="font-mono text-[10px] text-dim/70">
                         Max sub-questions the decomposer may emit (min is always 5).
                       </p>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim" htmlFor="s-max-investigation-rounds">
+                        Investigation rounds
+                      </label>
+                      <input
+                        id="s-max-investigation-rounds"
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={form.pipeline_caps.max_investigation_rounds}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            pipeline_caps: {
+                              ...form.pipeline_caps,
+                              max_investigation_rounds: Math.max(1, Math.min(10, Number(e.target.value))),
+                            },
+                          })
+                        }
+                        className="w-20 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
+                      />
+                      <span className="font-mono text-[10px] text-dim">(1-10, default 3)</span>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim" htmlFor="s-max-web-results-per-query">
+                        Web results / query
+                      </label>
+                      <input
+                        id="s-max-web-results-per-query"
+                        type="number"
+                        min={1}
+                        max={20}
+                        value={form.pipeline_caps.max_web_results_per_query}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            pipeline_caps: {
+                              ...form.pipeline_caps,
+                              max_web_results_per_query: Math.max(1, Math.min(20, Number(e.target.value))),
+                            },
+                          })
+                        }
+                        className="w-20 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
+                      />
+                      <span className="font-mono text-[10px] text-dim">(1-20, default 5)</span>
                     </div>
                   </div>
 

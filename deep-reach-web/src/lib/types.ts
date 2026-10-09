@@ -194,6 +194,8 @@ export interface PipelineCapsSettings {
   max_follow_up_queries: number;
   chunk_content_max_chars: number;
   decomposer_subquestion_max: number;
+  max_investigation_rounds: number;
+  max_web_results_per_query: number;
 }
 
 /** GET /settings (the dialog's loaded state). */

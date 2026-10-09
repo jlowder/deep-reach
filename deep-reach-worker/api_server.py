@@ -130,7 +130,7 @@ class TaskRecord:
     report_json: Optional[str] = None
     # Requested budgets, kept on the record so the queue pump can rebuild
     # the run args when it promotes this record to "running".
-    max_rounds: int = 3
+    max_rounds: Optional[int] = None
     budget_doc: int = 10
     budget_web: int = 5
     # Staged RAG documents attached at creation time; ingested at task
@@ -169,7 +169,7 @@ class ResearchRequest(BaseModel):
     """POST /research body. `topic` is required and must be non-empty."""
 
     topic: str = Field(..., min_length=1)
-    max_rounds: int = Field(3, ge=1)
+    max_rounds: Optional[int] = Field(None, ge=1)
     budget_doc: int = Field(10, ge=0)
     budget_web: int = Field(5, ge=0)
 
@@ -187,7 +187,7 @@ def default_run_fn(topic: str, **budgets: Any) -> dict:
     return deep_research_orchestrator.deep_research(
         user_query=topic,
         verbose=False,
-        max_rounds=int(budgets.get("max_rounds", 3)),
+        max_rounds=int(budgets["max_rounds"]) if budgets.get("max_rounds") is not None else None,
         budget_doc=int(budgets.get("budget_doc", 10)),
         budget_web=int(budgets.get("budget_web", 5)),
         on_stage=on_stage,
@@ -752,6 +752,8 @@ def create_app(
             ("max_follow_up_queries", "MAX_FOLLOW_UP_QUERIES"),
             ("chunk_content_max_chars", "CHUNK_CONTENT_MAX_CHARS"),
             ("decomposer_subquestion_max", "DECOMPOSER_SUBQUESTION_MAX"),
+            ("max_investigation_rounds", "MAX_INVESTIGATION_ROUNDS"),
+            ("max_web_results_per_query", "MAX_WEB_RESULTS_PER_QUERY"),
         ):
             if field in pipeline_caps:
                 non_secret[var] = str(pipeline_caps[field])
@@ -906,6 +908,8 @@ def _validate_settings_payload(payload: dict) -> list:
         "max_follow_up_queries": (0, 10),
         "chunk_content_max_chars": (100, 8000),
         "decomposer_subquestion_max": (5, 20),
+        "max_investigation_rounds": (1, 10),
+        "max_web_results_per_query": (1, 20),
     }
     for field, (lo, hi) in cap_bounds.items():
         if field in pipeline_caps:

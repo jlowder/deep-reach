@@ -213,6 +213,9 @@ class Config:
     max_follow_up_queries: int = 2
     chunk_content_max_chars: int = 800
     decomposer_subquestion_max: int = 10
+    # Investigation depth (settings dialog-backed).
+    max_investigation_rounds: int = 3
+    max_web_results_per_query: int = 5
 
     # Cached clients
     _clients: Dict[str, Any] = field(default_factory=dict)
@@ -388,6 +391,8 @@ def get_config() -> Config:
             max_follow_up_queries=_safe_int("MAX_FOLLOW_UP_QUERIES", 2),
             chunk_content_max_chars=_safe_int("CHUNK_CONTENT_MAX_CHARS", 800),
             decomposer_subquestion_max=_safe_int("DECOMPOSER_SUBQUESTION_MAX", 10),
+            max_investigation_rounds=_safe_int("MAX_INVESTIGATION_ROUNDS", 3),
+            max_web_results_per_query=_safe_int("MAX_WEB_RESULTS_PER_QUERY", 5),
         )
         
         # Validate configurations and issue warnings
@@ -638,6 +643,10 @@ MAX_FOLLOW_UP_QUERIES=2
 CHUNK_CONTENT_MAX_CHARS=800
 # Max sub-questions the decomposer may emit (min stays 5).
 DECOMPOSER_SUBQUESTION_MAX=10
+# Max investigator rounds per sub-question in goal mode.
+MAX_INVESTIGATION_ROUNDS=3
+# Max web search results returned per query.
+MAX_WEB_RESULTS_PER_QUERY=5
 '''
 
 

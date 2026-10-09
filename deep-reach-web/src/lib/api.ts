@@ -216,6 +216,8 @@ export function normalizeSettings(raw: unknown): Settings {
       max_follow_up_queries: _cap(pc.max_follow_up_queries, 2),
       chunk_content_max_chars: _cap(pc.chunk_content_max_chars, 800),
       decomposer_subquestion_max: _cap(pc.decomposer_subquestion_max, 10),
+      max_investigation_rounds: _cap(pc.max_investigation_rounds, 3),
+      max_web_results_per_query: _cap(pc.max_web_results_per_query, 5),
     },
     keyring: {
       available: typeof kr.available === "boolean" ? kr.available : false,

@@ -13,8 +13,9 @@ made. Covers the five required scenarios:
      [D1]/[W1] becomes reference 1).
   3. The write_section revision path is invoked with the critic's gaps.
   4. Critic garbage output falls back to the neutral pass (no revisions).
-  5. MAX_LLM_CALLS exhaustion stops the pipeline (warning) but still
-     assembles a final answer from what exists.
+  5. The LLM call budget is unlimited — the pipeline runs every stage to
+     completion (the former MAX_LLM_CALLS exhaustion guard has been
+     removed; stats.llm_calls still counts every call for observability).
 """
 
 import json
@@ -600,26 +601,29 @@ def test_critic_garbage_falls_back_to_neutral_no_revisions(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Scenario 5 — budget exhaustion stops the pipeline but assembles
+# Scenario 5 — unlimited LLM budget runs every stage to completion
 # ---------------------------------------------------------------------------
 
-def test_budget_exhaustion_stops_and_assembles(monkeypatch, capsys):
-    monkeypatch.setattr(dpo, "MAX_LLM_CALLS", 5)
-    # Cost model: decomposer(1) + sufficiency x2 (2,3) + 2 section drafts
-    # (4,5) → exhausted before the critic and the executive summary.
+def test_unlimited_budget_runs_all_stages(monkeypatch, capsys):
+    # With the budget limit removed, the pipeline now runs every stage —
+    # including the critic and executive summary — regardless of how many
+    # LLM calls each stage makes. stats.llm_calls is still tracked for
+    # observability but never gates execution.
     result = _run(monkeypatch, _basic_env(), output_format="markdown")
 
-    assert result["stats"]["llm_calls"] == 5
-    assert result["stats"]["revisions"] == 0
     final = result["final_answer"]
     assert "## Section One" in final
     assert "## Section Two" in final
-    assert "## Executive Summary" not in final
-    # References are deterministic — no LLM needed, so they still render.
+    # Critic ran (stage 4 logged) and exec summary was written.
+    assert "## Executive Summary" in final
     assert "## References" in final
-    # A warning was logged when the budget ran out.
+    assert result["stats"]["revisions"] == 0
+    # llm_calls is counted but never gated — just verify it's a positive int.
+    assert isinstance(result["stats"]["llm_calls"], int)
+    assert result["stats"]["llm_calls"] > 0
+    # No "budget exhausted" warning should appear.
     out = capsys.readouterr().out
-    assert "WARNING" in out and "budget exhausted" in out
+    assert "budget exhausted" not in out.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -816,25 +820,24 @@ def test_synthesis_appended_last_and_keys_resolve(monkeypatch):
         assert re.search(rf"^\[{n}\] ", refs, re.M), f"[{n}] has no reference"
 
 
-def test_synthesis_skipped_on_budget_exec_summary_still_writes(monkeypatch):
-    # T2: 8 tracked calls before stage 5 (decompose + 3 sufficiency +
-    # 3 drafts + critic); limit 9 leaves exactly 1 call → synthesis (needs
-    # 2: itself + exec summary) is skipped, exec summary still writes.
+def test_synthesis_runs_when_unlimited(monkeypatch):
+    # With the budget removed, synthesis always runs (it was previously
+    # skipped when the budget was too tight to afford synthesis + exec
+    # summary). Here we verify synthesis is NOT skipped.
     def writer_text(i, k):
         return _json_writer(i)
 
     env = _basic_env(writer_text=writer_text)
     env["plan_json"] = PLAN_JSON_3SQ
     writer_calls = _install_stubs(monkeypatch, env)
-    monkeypatch.setattr(dpo, "MAX_LLM_CALLS", 9)
     result = dpo.deep_research("test query", verbose=False, max_rounds=3)
 
-    assert not _synth_calls(writer_calls)
-    assert result["stats"]["synthesis_skipped"] == "budget"
-    assert "## Synthesis" not in result["final_answer"]
-    # Exec summary wrote with the final remaining call.
+    # Synthesis was called (not skipped).
+    assert _synth_calls(writer_calls)
+    assert result["stats"]["synthesis_skipped"] is None
+    assert "## Synthesis" in result["final_answer"]
+    # Exec summary wrote.
     assert "Synthesized executive summary prose." in result["final_answer"]
-    assert result["stats"]["llm_calls"] == 9
 
 
 def test_synthesis_failure_leaves_report_intact(monkeypatch):
@@ -1059,9 +1062,9 @@ def test_tracked_run_model_stack_reentrant():
     # stack residue.
     agents = (dmod, rmod, wmod, vmod)
     originals = {id(m): m.run_model for m in agents}
-    s1 = dpo._install_tracked_run_models(dpo._LLMBudget(40), False)
+    s1 = dpo._install_tracked_run_models(dpo._LLMBudget(), False)
     try:
-        s2 = dpo._install_tracked_run_models(dpo._LLMBudget(40), False)
+        s2 = dpo._install_tracked_run_models(dpo._LLMBudget(), False)
         assert all(m.run_model is not originals[id(m)] for m in agents)
         dpo._restore_tracked_run_models(s2)  # inner run unwinds first
     finally:
@@ -1070,7 +1073,7 @@ def test_tracked_run_model_stack_reentrant():
         assert m.run_model is originals[id(m)]
         assert not dpo._run_model_stacks.get(m)
     # A second sequential cycle also ends clean.
-    s3 = dpo._install_tracked_run_models(dpo._LLMBudget(40), False)
+    s3 = dpo._install_tracked_run_models(dpo._LLMBudget(), False)
     dpo._restore_tracked_run_models(s3)
     for m in agents:
         assert m.run_model is originals[id(m)]

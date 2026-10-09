@@ -45,6 +45,8 @@ NON_SECRET_VARS = (
     "MAX_FOLLOW_UP_QUERIES",
     "CHUNK_CONTENT_MAX_CHARS",
     "DECOMPOSER_SUBQUESTION_MAX",
+    "MAX_INVESTIGATION_ROUNDS",
+    "MAX_WEB_RESULTS_PER_QUERY",
 )
 
 # OS keyring service name for deep-reach entries.
@@ -369,6 +371,8 @@ def settings_view(path: Optional[Path] = None) -> dict:
     max_follow_up_queries = _cap("MAX_FOLLOW_UP_QUERIES", 2, 0, 10)
     chunk_content_max_chars = _cap("CHUNK_CONTENT_MAX_CHARS", 800, 100, 8000)
     decomposer_subquestion_max = _cap("DECOMPOSER_SUBQUESTION_MAX", 10, 5, 20)
+    max_investigation_rounds = _cap("MAX_INVESTIGATION_ROUNDS", 3, 1, 10)
+    max_web_results_per_query = _cap("MAX_WEB_RESULTS_PER_QUERY", 5, 1, 20)
 
     return {
         "llm": {
@@ -400,6 +404,8 @@ def settings_view(path: Optional[Path] = None) -> dict:
             "max_follow_up_queries": max_follow_up_queries,
             "chunk_content_max_chars": chunk_content_max_chars,
             "decomposer_subquestion_max": decomposer_subquestion_max,
+            "max_investigation_rounds": max_investigation_rounds,
+            "max_web_results_per_query": max_web_results_per_query,
         },
         "keyring": {"available": avail, "backend": backend},
         "requires_restart": _requires_restart(eff),
