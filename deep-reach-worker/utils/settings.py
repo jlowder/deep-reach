@@ -39,6 +39,14 @@ NON_SECRET_VARS = (
     "SEARCH_RECOVERY_COMMAND",
     "EMBEDDING_ENDPOINT",
     "EMBEDDING_MODEL",
+    "MAX_RECOVERED_BLOCKS",
+    "MAX_REVISIONS_PER_SECTION",
+    "MAX_EXPANSION_CALLS",
+    "MAX_FOLLOW_UP_QUERIES",
+    "CHUNK_CONTENT_MAX_CHARS",
+    "DECOMPOSER_SUBQUESTION_MAX",
+    "MAX_INVESTIGATION_ROUNDS",
+    "MAX_WEB_RESULTS_PER_QUERY",
 )
 
 # OS keyring service name for deep-reach entries.
@@ -344,6 +352,28 @@ def settings_view(path: Optional[Path] = None) -> dict:
     except ValueError:
         cool_down_seconds = 60
 
+    # --- pipeline caps (soft limits: clamped to safe bounds) ---
+    def _cap(name: str, default: int, lo: int, hi: int) -> int:
+        raw = eff.get(name)
+        try:
+            val = int(raw) if raw is not None else default
+        except ValueError:
+            val = default
+        if val < lo or val > hi:
+            logger.warning(
+                "settings: %s=%r outside [%d, %d]; clamped", name, raw, lo, hi
+            )
+        return max(lo, min(hi, val))
+
+    max_recovered_blocks = _cap("MAX_RECOVERED_BLOCKS", 20, 1, 100)
+    max_revisions_per_section = _cap("MAX_REVISIONS_PER_SECTION", 2, 0, 10)
+    max_expansion_calls = _cap("MAX_EXPANSION_CALLS", 8, 0, 30)
+    max_follow_up_queries = _cap("MAX_FOLLOW_UP_QUERIES", 2, 0, 10)
+    chunk_content_max_chars = _cap("CHUNK_CONTENT_MAX_CHARS", 800, 100, 8000)
+    decomposer_subquestion_max = _cap("DECOMPOSER_SUBQUESTION_MAX", 10, 5, 20)
+    max_investigation_rounds = _cap("MAX_INVESTIGATION_ROUNDS", 3, 1, 10)
+    max_web_results_per_query = _cap("MAX_WEB_RESULTS_PER_QUERY", 5, 1, 20)
+
     return {
         "llm": {
             "endpoint": eff.get("LLM_ENDPOINT"),
@@ -366,6 +396,16 @@ def settings_view(path: Optional[Path] = None) -> dict:
             "retry_count": retry_count,
             "cool_down_seconds": cool_down_seconds,
             "command": eff.get("SEARCH_RECOVERY_COMMAND") or "",
+        },
+        "pipeline_caps": {
+            "max_recovered_blocks": max_recovered_blocks,
+            "max_revisions_per_section": max_revisions_per_section,
+            "max_expansion_calls": max_expansion_calls,
+            "max_follow_up_queries": max_follow_up_queries,
+            "chunk_content_max_chars": chunk_content_max_chars,
+            "decomposer_subquestion_max": decomposer_subquestion_max,
+            "max_investigation_rounds": max_investigation_rounds,
+            "max_web_results_per_query": max_web_results_per_query,
         },
         "keyring": {"available": avail, "backend": backend},
         "requires_restart": _requires_restart(eff),

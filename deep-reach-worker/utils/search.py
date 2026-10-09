@@ -304,17 +304,23 @@ def pace_next_query(now: Optional[float] = None) -> float:
     return wait
 
 
-def web_search(query: str, num_results: int = 5) -> Dict[str, Any]:
+def web_search(query: str, num_results: int = 0) -> Dict[str, Any]:
     """Config-selected web search.
 
     Paces the call (SEARCH_THROTTLE_MS) so engine rate limits — temporary
     and rate-correlated — stay out of effect. Never raises; returns empty
     results on error and never retries (retrying a throttled engine makes
     it worse; pacing is the fix).
+
+    ``num_results`` defaults to 0, meaning "use the config value
+    (MAX_WEB_RESULTS_PER_QUERY, settings-dialog-backed)". Pass a positive
+    int to override per-call.
     """
     global _web_search_count
     _web_search_count += 1
     pace_next_query()
+    if num_results <= 0:
+        num_results = get_config().max_web_results_per_query
     out = get_search_tool().search(query, num_results)
     if out.get("results"):
         _warned.clear()  # backend answered: config failures may warn again later

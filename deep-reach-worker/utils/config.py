@@ -204,10 +204,22 @@ class Config:
     # higher value: DOC_SCORE_THRESHOLD=0.6. Cosine is a raw score, not a
     # calibrated probability, so there is no "correct" value per model.
     doc_score_threshold: float = 0.2
-    
+
+    # Pipeline caps (settings dialog-backed via env vars).
+    # Soft limits: the settings layer clamps to safe bounds and warns.
+    max_recovered_blocks: int = 20
+    max_revisions_per_section: int = 2
+    max_expansion_calls: int = 8
+    max_follow_up_queries: int = 2
+    chunk_content_max_chars: int = 800
+    decomposer_subquestion_max: int = 10
+    # Investigation depth (settings dialog-backed).
+    max_investigation_rounds: int = 3
+    max_web_results_per_query: int = 5
+
     # Cached clients
     _clients: Dict[str, Any] = field(default_factory=dict)
-    
+
     def get_agent_config(self, agent_name: str) -> LLMConfig:
         """Get configuration for a specific agent."""
         # Get overrides for this agent. The override fields are optional:
@@ -237,6 +249,21 @@ class Config:
 
 # Global config instance
 _config: Optional[Config] = None
+
+
+def _safe_int(env_var: str, default: int) -> int:
+    """Read an env var as int with a fallback default. Logs and falls
+    back on invalid values so a bad env setting never crashes config."""
+    raw = os.getenv(env_var)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        logging.getLogger(__name__).warning(
+            "Invalid %s=%r; falling back to %d.", env_var, raw, default
+        )
+        return default
 
 
 def get_config() -> Config:
@@ -357,6 +384,15 @@ def get_config() -> Config:
             search_recovery_retry_count=search_recovery_retry_count,
             search_recovery_cool_down_seconds=search_recovery_cool_down_seconds,
             search_recovery_command=search_recovery_command,
+            # Pipeline caps (settings dialog-backed; safe-int defaults)
+            max_recovered_blocks=_safe_int("MAX_RECOVERED_BLOCKS", 20),
+            max_revisions_per_section=_safe_int("MAX_REVISIONS_PER_SECTION", 2),
+            max_expansion_calls=_safe_int("MAX_EXPANSION_CALLS", 8),
+            max_follow_up_queries=_safe_int("MAX_FOLLOW_UP_QUERIES", 2),
+            chunk_content_max_chars=_safe_int("CHUNK_CONTENT_MAX_CHARS", 800),
+            decomposer_subquestion_max=_safe_int("DECOMPOSER_SUBQUESTION_MAX", 10),
+            max_investigation_rounds=_safe_int("MAX_INVESTIGATION_ROUNDS", 3),
+            max_web_results_per_query=_safe_int("MAX_WEB_RESULTS_PER_QUERY", 5),
         )
         
         # Validate configurations and issue warnings
@@ -593,6 +629,24 @@ SEARXNG_URL=http://localhost:8081
 # Throttling-safe policy: queries are spaced, NEVER retried — engine rate
 # limits are temporary and rate-correlated, so retrying makes them worse.
 SEARCH_THROTTLE_MS=1000
+
+# ----------------------------------------
+# Deep Pipeline Caps (optional)
+# ----------------------------------------
+# Tuned caps for the deep research pipeline (P1-4). The settings dialog
+# writes these to var.env; the worker reads them via get_config().
+# All are soft limits: the settings layer clamps to safe bounds and warns.
+MAX_RECOVERED_BLOCKS=20
+MAX_REVISIONS_PER_SECTION=2
+MAX_EXPANSION_CALLS=8
+MAX_FOLLOW_UP_QUERIES=2
+CHUNK_CONTENT_MAX_CHARS=800
+# Max sub-questions the decomposer may emit (min stays 5).
+DECOMPOSER_SUBQUESTION_MAX=10
+# Max investigator rounds per sub-question in goal mode.
+MAX_INVESTIGATION_ROUNDS=3
+# Max web search results returned per query.
+MAX_WEB_RESULTS_PER_QUERY=5
 '''
 
 

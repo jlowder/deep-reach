@@ -183,6 +183,9 @@ export function normalizeSettings(raw: unknown): Settings {
   const emb = isRecord(r.embeddings) ? r.embeddings : {};
   const kr = isRecord(r.keyring) ? r.keyring : {};
   const tool = str(search.tool);
+  const pc = isRecord(r.pipeline_caps) ? r.pipeline_caps : {};
+  const _cap = (v: unknown, d: number) =>
+    typeof v === "number" && Number.isFinite(v) ? v : d;
   return {
     llm: {
       endpoint: str(llm.endpoint),
@@ -205,6 +208,16 @@ export function normalizeSettings(raw: unknown): Settings {
       retry_count: num(isRecord(r.search_recovery) ? r.search_recovery.retry_count : 1),
       cool_down_seconds: num(isRecord(r.search_recovery) ? r.search_recovery.cool_down_seconds : 60),
       command: str(isRecord(r.search_recovery) ? r.search_recovery.command : ""),
+    },
+    pipeline_caps: {
+      max_recovered_blocks: _cap(pc.max_recovered_blocks, 20),
+      max_revisions_per_section: _cap(pc.max_revisions_per_section, 2),
+      max_expansion_calls: _cap(pc.max_expansion_calls, 8),
+      max_follow_up_queries: _cap(pc.max_follow_up_queries, 2),
+      chunk_content_max_chars: _cap(pc.chunk_content_max_chars, 800),
+      decomposer_subquestion_max: _cap(pc.decomposer_subquestion_max, 10),
+      max_investigation_rounds: _cap(pc.max_investigation_rounds, 3),
+      max_web_results_per_query: _cap(pc.max_web_results_per_query, 5),
     },
     keyring: {
       available: typeof kr.available === "boolean" ? kr.available : false,
