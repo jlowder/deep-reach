@@ -17,8 +17,8 @@ One-shot planning step for the deep research pipeline (DEEP.md §3.2).
 
 The orchestrator LLM is a hostile environment for planning (tool_choice=
 "required" with full state re-injected every iteration), so decomposition is a
-dedicated single structured call: the user query in, a ResearchPlan of 5-10
-MECE sub-questions out. Simple queries short-circuit to a single sub-question.
+dedicated single structured call: the user query in, a ResearchPlan of 5
+to DECOMPOSER_SUBQUESTION_MAX (default 10) MECE sub-questions out. Simple queries short-circuit to a single sub-question.
 The plan never raises: every failure path lands on a valid single-sub-question
 fallback plan, tagged with its "source" for observability.
 """
@@ -75,14 +75,26 @@ class ResearchPlan(BaseModel):
     )
 
 
-DECOMPOSER_INSTRUCTIONS = """
-You are the decomposition worker for a deep research pipeline.
+def _decomposer_subquestion_max() -> int:
+    """Resolve DECOMPOSER_SUBQUESTION_MAX from config (settings dialog-backed)."""
+    try:
+        return int(get_config().decomposer_subquestion_max)
+    except Exception:
+        return 10
+
+
+def _decomposer_instructions(max_subquestions: int) -> str:
+    """Build the decomposer prompt, interpolating the sub-question max.
+
+    The min stays 5 (hardcoded in the prompt); the max comes from config
+    (DECOMPOSER_SUBQUESTION_MAX, default 10)."""
+    return f"""You are the decomposition worker for a deep research pipeline.
 
 Decompose the user's query into the sub-questions that a comprehensive research
 report on the query must answer.
 
 Rules:
-- Produce 5 to 10 sub-questions that are MECE: each is self-contained and
+- Produce 5 to {max_subquestions} sub-questions that are MECE: each is self-contained and
   answerable on its own, no two overlap substantially, and together they fully
   cover a comprehensive research report on the query.
 - Every sub-question must be investigable with the available retrieval tools:
@@ -443,9 +455,10 @@ def _plain_text_plan_json(
         '}'
     )
     config = get_config()
+    _decomp_max = _decomposer_subquestion_max()
     try:
         response = run_model(
-            instructions=DECOMPOSER_INSTRUCTIONS,
+            instructions=_decomposer_instructions(_decomp_max),
             input_data=input_data,
             reasoning_effort=config.get_reasoning_effort("decomposer"),
             max_output_tokens=config.get_max_output_tokens("decomposer"),
@@ -516,7 +529,7 @@ def decompose_query(
     plan: Optional[Dict[str, Any]] = None
     try:
         response = run_model(
-            instructions=DECOMPOSER_INSTRUCTIONS,
+            instructions=_decomposer_instructions(_decomposer_subquestion_max()),
             input_data=input_data,
             text_format=ResearchPlan,
             reasoning_effort=config.get_reasoning_effort("decomposer"),

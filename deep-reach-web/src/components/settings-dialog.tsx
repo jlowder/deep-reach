@@ -38,6 +38,14 @@ interface FormState {
   search: { tool: SearchTool; searxng_url: string; throttle_ms: number };
   embeddings: { endpoint: string; model: string };
   search_recovery: { retry_count: number; cool_down_minutes: number; cool_down_seconds: number; command: string };
+  pipeline_caps: {
+    max_recovered_blocks: number;
+    max_revisions_per_section: number;
+    max_expansion_calls: number;
+    max_follow_up_queries: number;
+    chunk_content_max_chars: number;
+    decomposer_subquestion_max: number;
+  };
 }
 
 type KeyName = "llm" | "tavily" | "embedding";
@@ -64,6 +72,14 @@ function formFromSettings(s: Settings): FormState {
       cool_down_minutes: Math.floor(s.search_recovery.cool_down_seconds / 60),
       cool_down_seconds: s.search_recovery.cool_down_seconds % 60,
       command: s.search_recovery.command ?? "",
+    },
+    pipeline_caps: {
+      max_recovered_blocks: s.pipeline_caps.max_recovered_blocks,
+      max_revisions_per_section: s.pipeline_caps.max_revisions_per_section,
+      max_expansion_calls: s.pipeline_caps.max_expansion_calls,
+      max_follow_up_queries: s.pipeline_caps.max_follow_up_queries,
+      chunk_content_max_chars: s.pipeline_caps.chunk_content_max_chars,
+      decomposer_subquestion_max: s.pipeline_caps.decomposer_subquestion_max,
     },
   };
 }
@@ -463,6 +479,15 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
     const savedCoolDown = saved.search_recovery.cool_down_seconds;
     if (formCoolDown !== savedCoolDown) return true;
     if (form.search_recovery.command !== (saved.search_recovery.command ?? "")) return true;
+    // pipeline caps
+    const pc = form.pipeline_caps;
+    const spc = saved.pipeline_caps;
+    if (pc.max_recovered_blocks !== spc.max_recovered_blocks) return true;
+    if (pc.max_revisions_per_section !== spc.max_revisions_per_section) return true;
+    if (pc.max_expansion_calls !== spc.max_expansion_calls) return true;
+    if (pc.max_follow_up_queries !== spc.max_follow_up_queries) return true;
+    if (pc.chunk_content_max_chars !== spc.chunk_content_max_chars) return true;
+    if (pc.decomposer_subquestion_max !== spc.decomposer_subquestion_max) return true;
     return KEY_NAMES.some((n) => keyTouched[n]);
   }, [saved, form, keyTouched]);
 
@@ -505,6 +530,16 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
     if (formCoolDown !== saved.search_recovery.cool_down_seconds) searchRecovery.cool_down_seconds = formCoolDown;
     if (form.search_recovery.command !== (saved.search_recovery.command ?? "")) searchRecovery.command = form.search_recovery.command;
     if (Object.keys(searchRecovery).length) p.search_recovery = searchRecovery;
+    const pc: NonNullable<SaveSettingsPayload["pipeline_caps"]> = {};
+    const fpc = form.pipeline_caps;
+    const spc = saved.pipeline_caps;
+    if (fpc.max_recovered_blocks !== spc.max_recovered_blocks) pc.max_recovered_blocks = fpc.max_recovered_blocks;
+    if (fpc.max_revisions_per_section !== spc.max_revisions_per_section) pc.max_revisions_per_section = fpc.max_revisions_per_section;
+    if (fpc.max_expansion_calls !== spc.max_expansion_calls) pc.max_expansion_calls = fpc.max_expansion_calls;
+    if (fpc.max_follow_up_queries !== spc.max_follow_up_queries) pc.max_follow_up_queries = fpc.max_follow_up_queries;
+    if (fpc.chunk_content_max_chars !== spc.chunk_content_max_chars) pc.chunk_content_max_chars = fpc.chunk_content_max_chars;
+    if (fpc.decomposer_subquestion_max !== spc.decomposer_subquestion_max) pc.decomposer_subquestion_max = fpc.decomposer_subquestion_max;
+    if (Object.keys(pc).length) p.pipeline_caps = pc;
     const keysPayload: Record<string, string> = {};
     for (const name of KEY_NAMES) if (keyTouched[name]) keysPayload[name] = keys[name];
     if (Object.keys(keysPayload).length) p.keys = keysPayload as SaveSettingsPayload["keys"];
@@ -990,6 +1025,168 @@ export function SettingsDialog({ open, onClose, triggerRef }: SettingsDialogProp
                       <p className="font-mono text-[10px] text-dim/70">
                         When "no evidence" occurs, this command executes before each retry attempt.
                         Leave blank to skip recovery commands.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Pipeline Caps Section */}
+                  <div className="flex flex-col gap-3 border border-hairline p-4">
+                    <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-dim">Pipeline Caps</p>
+                    <p className="font-mono text-[10px] text-dim/70">
+                      Soft limits for deep research pipeline (P1-4). Values outside
+                      bounds are clamped and warned.
+                    </p>
+
+                    <div className="flex items-center gap-3">
+                      <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim" htmlFor="s-max-recovered-blocks">
+                        Recovered blocks
+                      </label>
+                      <input
+                        id="s-max-recovered-blocks"
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={form.pipeline_caps.max_recovered_blocks}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            pipeline_caps: {
+                              ...form.pipeline_caps,
+                              max_recovered_blocks: Math.max(1, Math.min(100, Number(e.target.value))),
+                            },
+                          })
+                        }
+                        className="w-20 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
+                      />
+                      <span className="font-mono text-[10px] text-dim">(1-100, default 20)</span>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim" htmlFor="s-max-revisions-per-section">
+                        Revisions / section
+                      </label>
+                      <input
+                        id="s-max-revisions-per-section"
+                        type="number"
+                        min={0}
+                        max={10}
+                        value={form.pipeline_caps.max_revisions_per_section}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            pipeline_caps: {
+                              ...form.pipeline_caps,
+                              max_revisions_per_section: Math.max(0, Math.min(10, Number(e.target.value))),
+                            },
+                          })
+                        }
+                        className="w-20 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
+                      />
+                      <span className="font-mono text-[10px] text-dim">(0-10, default 2)</span>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim" htmlFor="s-max-expansion-calls">
+                        Expansion calls
+                      </label>
+                      <input
+                        id="s-max-expansion-calls"
+                        type="number"
+                        min={0}
+                        max={30}
+                        value={form.pipeline_caps.max_expansion_calls}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            pipeline_caps: {
+                              ...form.pipeline_caps,
+                              max_expansion_calls: Math.max(0, Math.min(30, Number(e.target.value))),
+                            },
+                          })
+                        }
+                        className="w-20 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
+                      />
+                      <span className="font-mono text-[10px] text-dim">(0-30, default 8)</span>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim" htmlFor="s-max-follow-up-queries">
+                        Follow-up queries
+                      </label>
+                      <input
+                        id="s-max-follow-up-queries"
+                        type="number"
+                        min={0}
+                        max={10}
+                        value={form.pipeline_caps.max_follow_up_queries}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            pipeline_caps: {
+                              ...form.pipeline_caps,
+                              max_follow_up_queries: Math.max(0, Math.min(10, Number(e.target.value))),
+                            },
+                          })
+                        }
+                        className="w-20 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
+                      />
+                      <span className="font-mono text-[10px] text-dim">(0-10, default 2)</span>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim" htmlFor="s-chunk-content-max-chars">
+                        Chunk max chars
+                      </label>
+                      <input
+                        id="s-chunk-content-max-chars"
+                        type="number"
+                        min={100}
+                        max={8000}
+                        value={form.pipeline_caps.chunk_content_max_chars}
+                        onChange={(e) =>
+                          setForm({
+                            ...form,
+                            pipeline_caps: {
+                              ...form.pipeline_caps,
+                              chunk_content_max_chars: Math.max(100, Math.min(8000, Number(e.target.value))),
+                            },
+                          })
+                        }
+                        className="w-24 rounded-none border border-hairline bg-field px-2 py-1 font-mono text-[12px]"
+                      />
+                      <span className="font-mono text-[10px] text-dim">(100-8000, default 800)</span>
+                    </div>
+
+                    {/* Decomposer sub-question max slider (min stays 5) */}
+                    <div className="flex flex-col gap-2">
+                      <div className="flex items-center gap-3">
+                        <label className="font-mono text-[10px] uppercase tracking-[0.12em] text-dim" htmlFor="s-decomposer-subquestion-max">
+                          Sub-question max
+                        </label>
+                        <input
+                          id="s-decomposer-subquestion-max"
+                          type="range"
+                          min={5}
+                          max={20}
+                          step={1}
+                          value={form.pipeline_caps.decomposer_subquestion_max}
+                          onChange={(e) =>
+                            setForm({
+                              ...form,
+                              pipeline_caps: {
+                                ...form.pipeline_caps,
+                                decomposer_subquestion_max: Number(e.target.value),
+                              },
+                            })
+                          }
+                          className="flex-1 accent-[var(--accent)]"
+                        />
+                        <span className="font-mono text-[10px] text-dim w-8 text-right">
+                          {form.pipeline_caps.decomposer_subquestion_max}
+                        </span>
+                      </div>
+                      <p className="font-mono text-[10px] text-dim/70">
+                        Max sub-questions the decomposer may emit (min is always 5).
                       </p>
                     </div>
                   </div>

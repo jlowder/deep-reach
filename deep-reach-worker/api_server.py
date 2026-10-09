@@ -744,6 +744,17 @@ def create_app(
         for field, var in (("retry_count", "SEARCH_RECOVERY_RETRY_COUNT"), ("cool_down_seconds", "SEARCH_RECOVERY_COOL_DOWN_SECONDS"), ("command", "SEARCH_RECOVERY_COMMAND")):
             if field in search_recovery:
                 non_secret[var] = str(search_recovery[field])
+        pipeline_caps = payload.get("pipeline_caps") or {}
+        for field, var in (
+            ("max_recovered_blocks", "MAX_RECOVERED_BLOCKS"),
+            ("max_revisions_per_section", "MAX_REVISIONS_PER_SECTION"),
+            ("max_expansion_calls", "MAX_EXPANSION_CALLS"),
+            ("max_follow_up_queries", "MAX_FOLLOW_UP_QUERIES"),
+            ("chunk_content_max_chars", "CHUNK_CONTENT_MAX_CHARS"),
+            ("decomposer_subquestion_max", "DECOMPOSER_SUBQUESTION_MAX"),
+        ):
+            if field in pipeline_caps:
+                non_secret[var] = str(pipeline_caps[field])
 
         keys = payload.get("keys") or {}
         key_map = {"llm": "llm-api-key", "tavily": "tavily-api-key", "embedding": "embedding-api-key"}
@@ -886,6 +897,29 @@ def _validate_settings_payload(payload: dict) -> list:
     if "command" in search_recovery and not isinstance(search_recovery["command"], str):
         details.append("search_recovery.command must be a string")
 
+    # --- pipeline caps (soft limits: type-validated, clamped, warned) ---
+    pipeline_caps = section("pipeline_caps")
+    cap_bounds = {
+        "max_recovered_blocks": (1, 100),
+        "max_revisions_per_section": (0, 10),
+        "max_expansion_calls": (0, 30),
+        "max_follow_up_queries": (0, 10),
+        "chunk_content_max_chars": (100, 8000),
+        "decomposer_subquestion_max": (5, 20),
+    }
+    for field, (lo, hi) in cap_bounds.items():
+        if field in pipeline_caps:
+            v = pipeline_caps[field]
+            if isinstance(v, bool) or not isinstance(v, int):
+                details.append(f"pipeline_caps.{field} must be an integer")
+            elif v < lo or v > hi:
+                # Soft limit: log a warning but don't reject — the settings
+                # layer clamps to bounds when serving the value.
+                logger.warning(
+                    "pipeline_caps.%s=%d outside [%d, %d]; clamped on read",
+                    field, v, lo, hi,
+                )
+
     keys = payload.get("keys")
     if keys is not None and not isinstance(keys, dict):
         details.append("keys must be an object")
@@ -896,7 +930,7 @@ def _validate_settings_payload(payload: dict) -> list:
         elif not isinstance(value, str):
             details.append(f"keys.{name} must be a string (empty string deletes)")
 
-    if not any(payload.get(k) for k in ("llm", "search", "embeddings", "search_recovery", "keys")):
+    if not any(payload.get(k) for k in ("llm", "search", "embeddings", "search_recovery", "pipeline_caps", "keys")):
         details.append("nothing to update — provide llm, search, embeddings, search_recovery and/or keys")
     return details
 

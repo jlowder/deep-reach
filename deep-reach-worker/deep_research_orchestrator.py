@@ -151,8 +151,25 @@ def _get_search_recovery_config() -> Dict[str, Any]:
 MAX_LLM_CALLS = 40
 
 # Revision caps (P1-4): per section and global expansion calls.
+# Defaults here; the runtime values come from get_config() so the settings
+# dialog can tune them. _revision_caps() resolves the current values.
 _MAX_REVISIONS_PER_SECTION = 2
 _MAX_EXPANSION_CALLS = 8
+
+
+def _revision_caps():
+    """Resolve the revision caps from config (settings dialog-backed).
+
+    Falls back to the module-level defaults on any config access failure
+    so the pipeline never hard-crashes on a bad env value."""
+    try:
+        cfg = get_config()
+        return (
+            int(getattr(cfg, "max_revisions_per_section", _MAX_REVISIONS_PER_SECTION)),
+            int(getattr(cfg, "max_expansion_calls", _MAX_EXPANSION_CALLS)),
+        )
+    except Exception:
+        return _MAX_REVISIONS_PER_SECTION, _MAX_EXPANSION_CALLS
 
 
 class _BudgetExhausted(Exception):
@@ -1346,11 +1363,12 @@ def deep_research(
                 _notify_stage(4, f"critic: revision queue — {len(revision_queue)} section(s) need improvement")
 
             if revision_queue:
+                _max_revisions_per_section, _max_expansion_calls = _revision_caps()
                 rev_counts: Dict[str, int] = {}
                 for index, sid, gaps in revision_queue:
                     if (
-                        stats["revisions"] >= _MAX_EXPANSION_CALLS
-                        or rev_counts.get(sid, 0) >= _MAX_REVISIONS_PER_SECTION
+                        stats["revisions"] >= _max_expansion_calls
+                        or rev_counts.get(sid, 0) >= _max_revisions_per_section
                     ):
                         if verbose:
                             print(

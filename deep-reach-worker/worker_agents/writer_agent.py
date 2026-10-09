@@ -101,7 +101,15 @@ def _extract_json_object(text: str) -> dict | None:
 
 
 _BLOCK_VOCAB = frozenset(t.value for t in BlockType)
-_MAX_RECOVERED_BLOCKS = 20
+_MAX_RECOVERED_BLOCKS_DEFAULT = 20
+
+
+def _max_recovered_blocks() -> int:
+    """Resolve MAX_RECOVERED_BLOCKS from config (settings dialog-backed)."""
+    try:
+        return int(get_config().max_recovered_blocks)
+    except Exception:
+        return _MAX_RECOVERED_BLOCKS_DEFAULT
 
 
 def _recover_trailing_blocks(
@@ -113,7 +121,7 @@ def _recover_trailing_blocks(
     block-vocabulary value and which validate as ReportBlock (the lenient
     string-cell coercion applies; invalids are skipped). Ignored entirely
     when the remainder is insignificant (<200 non-ws chars and no '{').
-    Capped at _MAX_RECOVERED_BLOCKS blocks.
+    Capped at max_recovered_blocks() blocks (config-backed).
 
     Degenerate-loop guard: a recovered block that is an EXACT duplicate of a
     block already in the section (`existing`, normalized via
@@ -129,8 +137,9 @@ def _recover_trailing_blocks(
     out: list[ReportBlock] = []
     seen: set[str] = set()
     spans: list[tuple[int, int]] = []
+    _cap = _max_recovered_blocks()
     for i, ch in enumerate(remainder):
-        if ch != "{" or len(out) >= _MAX_RECOVERED_BLOCKS:
+        if ch != "{" or len(out) >= _cap:
             continue
         try:
             obj, b_end = _JSON_DECODER.raw_decode(remainder, i)

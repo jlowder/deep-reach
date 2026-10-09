@@ -185,6 +185,17 @@ export interface SearchRecoverySettings {
   command: string;
 }
 
+/** Deep pipeline caps (settings dialog → Advanced). All are soft limits:
+ *  the backend clamps to safe bounds and warns on out-of-range values. */
+export interface PipelineCapsSettings {
+  max_recovered_blocks: number;
+  max_revisions_per_section: number;
+  max_expansion_calls: number;
+  max_follow_up_queries: number;
+  chunk_content_max_chars: number;
+  decomposer_subquestion_max: number;
+}
+
 /** GET /settings (the dialog's loaded state). */
 export interface Settings {
   llm: {
@@ -205,6 +216,7 @@ export interface Settings {
     key: SettingsKeyState;
   };
   search_recovery: SearchRecoverySettings;
+  pipeline_caps: PipelineCapsSettings;
   keyring: {
     available: boolean;
     backend: string | null;
@@ -221,6 +233,7 @@ export interface SaveSettingsPayload {
   search?: { tool?: SearchTool; searxng_url?: string; throttle_ms?: number };
   embeddings?: { endpoint?: string; model?: string };
   search_recovery?: { retry_count?: number; cool_down_seconds?: number; command?: string };
+  pipeline_caps?: Partial<PipelineCapsSettings>;
   keys?: { llm?: string; tavily?: string; embedding?: string };
 }
 

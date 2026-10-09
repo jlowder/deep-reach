@@ -38,7 +38,16 @@ class ResearchEvidencePack(BaseModel):
 # Maximum characters to retain per retrieved document chunk.
 # PDF page content can easily be 2000-8000+ chars; we cap it to keep
 # the LLM context window manageable when accumulated across iterations.
-_CHUNK_CONTENT_MAX_CHARS = 800
+# Config-backed (settings dialog-backed); see _chunk_content_max_chars().
+_CHUNK_CONTENT_MAX_CHARS_DEFAULT = 800
+
+
+def _chunk_content_max_chars() -> int:
+    """Resolve CHUNK_CONTENT_MAX_CHARS from config (settings dialog-backed)."""
+    try:
+        return int(get_config().chunk_content_max_chars)
+    except Exception:
+        return _CHUNK_CONTENT_MAX_CHARS_DEFAULT
 
 
 # None means "use the configured DOC_SCORE_THRESHOLD" (utils/config.py,
@@ -67,7 +76,7 @@ def retrieve_document(
     def _truncate(text: str) -> str:
         if not text:
             return text
-        return text[:_CHUNK_CONTENT_MAX_CHARS]
+        return text[:_chunk_content_max_chars()]
 
     def _as_page_number(value: Any) -> Optional[int]:
         # Defensive parse: legacy/missing payloads can lack a usable page.
@@ -122,7 +131,16 @@ def retrieve_document(
 
 # Keep at most this many follow-up queries per sufficiency round so a single
 # sub-question cannot fan out into unbounded retrieval.
-_MAX_FOLLOW_UP_QUERIES = 2
+# Config-backed (settings dialog-backed); see _max_follow_up_queries().
+_MAX_FOLLOW_UP_QUERIES_DEFAULT = 2
+
+
+def _max_follow_up_queries() -> int:
+    """Resolve MAX_FOLLOW_UP_QUERIES from config (settings dialog-backed)."""
+    try:
+        return int(get_config().max_follow_up_queries)
+    except Exception:
+        return _MAX_FOLLOW_UP_QUERIES_DEFAULT
 
 
 def _apply_budget(
@@ -299,7 +317,7 @@ def _evaluate_sufficiency(
     data["source"] = source
     # Never let a malformed report fan out beyond the cap.
     data["follow_up_queries"] = [q for q in data["follow_up_queries"] if q and q.strip()][
-        :_MAX_FOLLOW_UP_QUERIES
+        :_max_follow_up_queries()
     ]
     return data
 
@@ -464,7 +482,7 @@ def _goal_driven_retrieval(
         if not report["follow_up_queries"]:
             # No target for a targeted re-query.
             break
-        round_queries = report["follow_up_queries"][:_MAX_FOLLOW_UP_QUERIES]
+        round_queries = report["follow_up_queries"][:_max_follow_up_queries()]
 
     budgeted = _apply_budget(
         {
