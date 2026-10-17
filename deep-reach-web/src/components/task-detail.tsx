@@ -64,8 +64,8 @@ export function TaskDetail({ task, summary, queuePosition, updateError, onDelete
       aria-label={`Task: ${base.topic}`}
       className="flex min-w-0 animate-fade-up flex-col gap-4 h-[calc(100vh-8rem)]"
     >
-      <div className="flex flex-wrap items-center gap-3">
-        <h2 className="font-display text-[22px] font-semibold leading-tight">
+      <div className="flex min-h-0 flex-wrap items-center gap-3">
+        <h2 className="font-display text-[22px] font-semibold leading-tight max-h-[28vh] overflow-y-auto">
           {base.topic}
         </h2>
         <span
