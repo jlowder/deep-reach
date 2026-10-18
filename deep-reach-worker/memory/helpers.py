@@ -1,6 +1,7 @@
 import json
 import re
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 # infer route used from available document and web evidence
 def infer_route_used(document_chunks: list[Any], web_results: list[Any]) -> str:
@@ -214,6 +215,16 @@ def assign_citation_keys(
     return registry, doc_key_map, web_key_map
 
 
+def _domain_of(url: str) -> str:
+    """Fallback display name for a title-less URL: the hostname with a
+    leading "www." stripped ("https://www.arxiv.org/abs/123" ->
+    "arxiv.org"). "" when the URL carries no netloc (empty or schemeless)."""
+    netloc = urlparse((url or "").strip()).netloc
+    if netloc.startswith("www."):
+        netloc = netloc[len("www."):]
+    return netloc
+
+
 def render_evidence_text(
     doc_chunks: list[dict],
     web_results: list[dict],
@@ -229,7 +240,8 @@ def render_evidence_text(
         [D1] {title} — {document_name} p. {page_number}\n{content}\n
     (" p. N" omitted when the page is unknown)
         [W1] {title} ({url}, {date})\n{content}\n
-    (date omitted when absent). Chunks without a key are rendered under an
+    (date omitted when absent; a title-less web result uses its URL domain
+    as the name). Chunks without a key are rendered under an
     "(uncited)" marker as plain context. Ordering: docs before web; within
     each kind, score descending (stable tiebreak document_name / title), so
     keyed chunks render in D1..Dn / W1..Wn order.
@@ -271,6 +283,11 @@ def render_evidence_text(
             web_blocks.append(f"{header}\n{content}\n")
             continue
         title = (result.get("title") or "").strip()
+        if not title:
+            # A title-less result would render as a key with no name, and the
+            # writer model would list an empty source; the URL domain is the
+            # best display name available.
+            title = _domain_of(url)
         date = (result.get("published_date") or "").strip()
         source = url + (f", {date}" if date else "")
         header = f"{title} ({source})" if title else f"({source})"
