@@ -952,6 +952,59 @@ def _lint_citation_format(report: ResearchReport, registry: dict = None) -> dict
 
 
 # ---------------------------------------------------------------------------
+# Degenerate callout / citation-note prose (the empty-list-join artifact)
+# ---------------------------------------------------------------------------
+
+# Signatures of a zero-name join left behind by the writer's boilerplate:
+# a run of two or more commas, a colon with only a terminal period after it
+# ("Sources: ."), or a trailing ", and ." with no final member. The colon
+# and "and" signatures are anchored to the END of the text — the residue sits
+# at the tail of the sentence — so mid-prose matches ("Time: .5 seconds", a
+# terminal-period lint leaving "X, and." before a following sentence) never
+# fire.
+_DEGENERATE_CALLOUT_RE = re.compile(r",{2,}|:\s*\.\s*$|,\s*and\s*\.\s*$")
+
+
+def _strip_degenerate_callouts(report: ResearchReport) -> int:
+    """Drop callout / citation_note blocks whose prose is an empty-list-join
+    artifact, in place.
+
+    A writer that receives an empty evidence list still runs its "All claims
+    in this section are supported by the provided evidence sources" template,
+    and joining zero names leaves the punctuation residue above — a block that
+    prints as a garbled, nameless citation list. The test runs on the
+    block's concatenated span prose (block.text when it has no spans) with
+    whitespace collapsed; any doubt keeps the block. Conservative by design,
+    idempotent, never raises. Returns the number of blocks dropped (landed
+    in quality.verification.degenerate_callouts_stripped).
+    """
+    dropped_total = 0
+    try:
+        for section in report.report.sections or []:
+            kept: list[ReportBlock] = []
+            dropped = 0
+            for block in section.blocks or []:
+                if block.type not in (BlockType.callout, BlockType.citation_note):
+                    kept.append(block)
+                    continue
+                if block.spans:
+                    raw = " ".join(s.text for s in block.spans if isinstance(s, Span))
+                else:
+                    raw = block.text or ""
+                text = re.sub(r"\s+", " ", raw).strip()
+                if _DEGENERATE_CALLOUT_RE.search(text):
+                    dropped += 1
+                    continue
+                kept.append(block)
+            if dropped:
+                section.blocks = kept
+                dropped_total += dropped
+    except Exception:
+        logger.exception("degenerate callout strip failed; keeping blocks as-is")
+    return dropped_total
+
+
+# ---------------------------------------------------------------------------
 # JSON-style unicode escapes in math (the `\\u2014` breve-bowl artifact)
 # ---------------------------------------------------------------------------
 
@@ -1314,7 +1367,9 @@ def assemble_structured_report(
     source titles, drop empty bracket pairs), lint citation format (strip
     redundant key groups the renderer would double-print, insert missing
     terminal periods on cited sentence-final spans, collapse repeated
-    clause citations), restore LaTeX backslashes a JSON decode consumed
+    clause citations), strip degenerate callout/citation-note blocks whose
+    prose is an empty-list-join artifact (",," / ": ." / trailing ", and ."),
+    restore LaTeX backslashes a JSON decode consumed
     (a model `\\t` in JSON becomes a TAB with the `t` gone, leaving
     `<TAB>imes` where `\\times` was — task 10b502cf), decode JSON-style
     unicode escapes in math, promote undelimited display-equation spans to
@@ -1322,8 +1377,8 @@ def assemble_structured_report(
     $...$, balance unmatched closing braces in equation block bodies,
     normalize comparison_table row widths to the header, and compute quality
     metrics. All repair counts land in
-    quality.verification.normalized_citations / decoded_unicode_escapes /
-    restored_late_backslash_commands.
+    quality.verification (normalized_citations / decoded_unicode_escapes /
+    restored_late_backslash_commands / degenerate_callouts_stripped).
     `evidence_json` is accepted for interface stability and reserved for
     future provenance fields.
     """
@@ -1363,6 +1418,7 @@ def assemble_structured_report(
     key_rewrite_counts = _rewrite_prose_source_keys(report, registry)
     norm_counts = _normalize_citation_marks(report)
     lint_counts = _lint_citation_format(report, registry)
+    degenerate_stripped = _strip_degenerate_callouts(report)
     decoded_escapes = _decode_unicode_escapes(report)
     restored_backslashes = _restore_late_backslash(report)
     _promote_bare_equation_spans(report)
@@ -1385,6 +1441,7 @@ def assemble_structured_report(
             "repeated_cites_collapsed": lint_counts["repeated_cites_collapsed"],
         },
         "decoded_unicode_escapes": decoded_escapes,
+        "degenerate_callouts_stripped": degenerate_stripped,
         "restored_late_backslash_commands": restored_backslashes,
     }
     if not_generated or orphan_gaps:
