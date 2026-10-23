@@ -8,6 +8,13 @@ joining zero names leaves punctuation residue such as "sources,,,, and."):
 
 - _strip_degenerate_callouts drops a callout/citation_note block whose
   (whitespace-normalized) prose is such a residue — and never real prose.
+  Its signatures treat the terminal period as optional (",,," / a bare or
+  dotted colon tail / trailing ", and"), because assembly runs the strip
+  BEFORE the terminal-period citation lint.
+- Assembly runs the strip BEFORE the empty-section guard, so a section
+  reduced to a bare heading by the strip gets the not-generated
+  placeholder (a >=30-word degenerate callout must not clear the guard
+  first and then vanish).
 - _domain_of gives a title-less web result a display name (the URL domain)
   so the writer never lists an empty source.
 
@@ -26,7 +33,13 @@ from models.report_schema import (
     Span,
 )
 
-from deep_research_structured import _strip_degenerate_callouts, assemble_structured_report
+from deep_research_structured import (
+    _DEGENERATE_CALLOUT_RE,
+    _NOT_GENERATED_TEXT,
+    _apply_empty_section_guards,
+    _strip_degenerate_callouts,
+    assemble_structured_report,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +60,10 @@ def _note(*spans: Span, text: str = "") -> ReportBlock:
 
 def _para(*spans: Span) -> ReportBlock:
     return ReportBlock(type=BlockType.paragraph, spans=list(spans))
+
+
+def _heading(level: int, text: str) -> ReportBlock:
+    return ReportBlock(type=BlockType.heading, level=level, text=text)
 
 
 def _report(*blocks: ReportBlock) -> ResearchReport:
@@ -186,6 +203,124 @@ def test_assemble_strips_and_counts():
     # Sibling verification keys are intact.
     assert rep.quality.verification["normalized_citations"]
     assert rep.quality.verification["decoded_unicode_escapes"] == 0
+
+
+# ---------------------------------------------------------------------------
+# _DEGENERATE_CALLOUT_RE: order-independence (the strip now runs before the
+# terminal-period citation lint, so the trailing period must be optional)
+# ---------------------------------------------------------------------------
+
+def test_regex_matches_bare_trailing_colon():
+    # No terminal period yet — the lint that adds it runs AFTER the strip.
+    assert _DEGENERATE_CALLOUT_RE.search("Sources:")
+
+
+def test_regex_matches_colon_with_terminal_period():
+    assert _DEGENERATE_CALLOUT_RE.search("Sources: .")
+
+
+def test_regex_matches_trailing_and_without_period():
+    assert _DEGENERATE_CALLOUT_RE.search("Sources: a, b, and")
+
+
+def test_regex_still_matches_original_artifact_shapes():
+    # The reported ",,,, and." residue and its no-period variant.
+    assert _DEGENERATE_CALLOUT_RE.search("evidence sources,,,, and.")
+    assert _DEGENERATE_CALLOUT_RE.search("evidence sources,,,, and")
+
+
+def test_regex_rejects_well_formed_list():
+    assert not _DEGENERATE_CALLOUT_RE.search("Sources: a, b, and c.")
+
+
+# ---------------------------------------------------------------------------
+# Strip-vs-empty-guard ordering (the regression)
+# ---------------------------------------------------------------------------
+
+def test_guard_fires_on_heading_only_section():
+    # A [heading-only] section is below the 30-word threshold, so the guard
+    # replaces its blocks with the not-generated placeholder (heading kept).
+    rep = _report(_heading(3, "Subtopic"))
+    gaps = _apply_empty_section_guards(rep)
+    assert gaps == ["not_generated: Findings"]
+    assert [b.type for b in _blocks(rep)] == [BlockType.paragraph]
+    assert _NOT_GENERATED_TEXT in _blocks(rep)[0].spans[0].text
+
+
+def test_assemble_degenerate_callout_reduced_to_heading_gets_placeholder():
+    """Regression: a section whose only content is a >=30-word degenerate
+    callout. Before the reorder the guard ran FIRST, saw 30+ words, and
+    passed; the later strip then left [heading] and the section shipped
+    empty — no placeholder, no gap. After the reorder the strip runs
+    before the guard, so the guard sees the heading-only section and
+    replaces its blocks with the not-generated placeholder."""
+    deg = (
+        "All claims in this section are supported by the provided evidence "
+        "sources,,,, and the interpretability literature on scaling limits, "
+        "data quality, architecture choices, evaluation protocols, and the "
+        "remaining secondary findings listed in the works cited above."
+    )
+    assert len(deg.split()) >= 30  # pre-reorder: would clear the guard
+    rep = assemble_structured_report(
+        sections=[
+            Section(
+                heading="Technological Advances",
+                blocks=[_heading(3, "Subtopic One"), _callout(_span(deg))],
+            )
+        ],
+        registry={},
+        user_query="q",
+        session_id="s1",
+        exec_paragraphs=["Ex."],
+        verification_status={"confidence": "medium"},
+        title="T",
+    )
+    sec = rep.report.sections[0]
+    assert sec.heading == "Technological Advances"  # heading preserved
+    assert [b.type for b in sec.blocks] == [BlockType.paragraph]  # callout gone
+    assert _NOT_GENERATED_TEXT in sec.blocks[0].spans[0].text
+    assert rep.quality.verification["degenerate_callouts_stripped"] == 1
+    assert any(
+        g.startswith("not_generated:")
+        for g in rep.quality.verification.get("gaps") or []
+    )
+
+
+def test_assemble_normal_callout_survives_strip_and_guard():
+    """Non-regression: a substantive callout (no degenerate signature) is
+    kept, the section stays non-empty, and nothing is recorded as a gap."""
+    body = (
+        "The interpretability literature converges on the view that scaling "
+        "alone does not buy reasoning: the evidence favors data quality and "
+        "evaluation design as the dominant levers, and practitioners should "
+        "weight both when choosing a training recipe for new models."
+    )
+    rep = assemble_structured_report(
+        sections=[
+            Section(
+                heading="Interpretability",
+                blocks=[_heading(3, "Subtopic"), _callout(_span(body))],
+            )
+        ],
+        registry={},
+        user_query="q",
+        session_id="s1",
+        exec_paragraphs=["Ex."],
+        verification_status={"confidence": "medium"},
+        title="T",
+    )
+    sec = rep.report.sections[0]
+    assert [b.type for b in sec.blocks] == [
+        BlockType.heading,
+        BlockType.callout,
+    ]
+    callout_words = len(" ".join(s.text for s in sec.blocks[1].spans).split())
+    assert callout_words >= 30  # callout intact (not stripped)
+    assert rep.quality.verification["degenerate_callouts_stripped"] == 0
+    assert not any(
+        g.startswith("not_generated:")
+        for g in rep.quality.verification.get("gaps") or []
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -29,7 +29,7 @@ class TestSearchRecoveryVarEnv:
         
         content = s.read_var_env(p)
         assert content["SEARCH_RECOVERY_RETRY_COUNT"] == "3"
-        assert content["SEARCH_RECOVERY_COOL_DOWN_SECONDS"] "900"
+        assert content["SEARCH_RECOVERY_COOL_DOWN_SECONDS"] == "900"
         assert content["SEARCH_RECOVERY_COMMAND"] == "docker restart searxng"
 
     def test_read_var_env_reads_recovery_fields(self, tmp_path):

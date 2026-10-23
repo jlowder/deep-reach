@@ -956,13 +956,16 @@ def _lint_citation_format(report: ResearchReport, registry: dict = None) -> dict
 # ---------------------------------------------------------------------------
 
 # Signatures of a zero-name join left behind by the writer's boilerplate:
-# a run of two or more commas, a colon with only a terminal period after it
-# ("Sources: ."), or a trailing ", and ." with no final member. The colon
-# and "and" signatures are anchored to the END of the text — the residue sits
-# at the tail of the sentence — so mid-prose matches ("Time: .5 seconds", a
+# a run of two or more commas, a colon with nothing (or only a terminal
+# period) after it ("Sources:" / "Sources: ."), or a trailing ", and" (with
+# optional terminal period) and no final member. The colon and "and"
+# signatures are anchored to the END of the text — the residue sits at the
+# tail of the sentence — so mid-prose matches ("Time: .5 seconds", a
 # terminal-period lint leaving "X, and." before a following sentence) never
-# fire.
-_DEGENERATE_CALLOUT_RE = re.compile(r",{2,}|:\s*\.\s*$|,\s*and\s*\.\s*$")
+# fire. The terminal period is OPTIONAL because assembly runs this strip
+# BEFORE the terminal-period citation lint: a "Sources:" tail must be caught
+# whether or not a later lint would have added the ".".
+_DEGENERATE_CALLOUT_RE = re.compile(r",{2,}|:\s*\.?\s*$|,\s*and\s*\.?\s*$")
 
 
 def _strip_degenerate_callouts(report: ResearchReport) -> int:
@@ -1356,20 +1359,26 @@ def assemble_structured_report(
     sections and the citation registry (plan §6). No LLM calls.
 
     Steps: collapse adjacent duplicate blocks, flag unresolvable citations,
-    drop bare-numeric citations, map the cited registry entries to deduped
-    Source records (plan §8.1), renumber citation arrays and rewrite
-    [D#]/[W#] text markers onto those final records (plan §6.3 — positions
-    are 1-based into the deduped array, so they never go out of range),
-    drop sub-heading blocks with no content zone, resolve bare registry keys
-    in citation-note/callout prose to source titles (the bibliography never
-    prints keys, so a prose key would dangle), normalize citation marks
-    (collapse adjacent identical bracket groups, de-bracket registered
-    source titles, drop empty bracket pairs), lint citation format (strip
-    redundant key groups the renderer would double-print, insert missing
-    terminal periods on cited sentence-final spans, collapse repeated
-    clause citations), strip degenerate callout/citation-note blocks whose
-    prose is an empty-list-join artifact (",," / ": ." / trailing ", and ."),
-    restore LaTeX backslashes a JSON decode consumed
+    drop bare-numeric citations, strip degenerate callout/citation-note
+    blocks whose prose is an empty-list-join artifact (",," / a bare or
+    dotted colon tail / trailing ", and" — terminal period optional) BEFORE
+    the empty-section guard applies (the guard must judge the post-strip
+    state, or a section reduced to a bare heading by the strip would ship
+    empty with no not-generated placeholder), apply the empty-section guard
+    (near-empty sections get a placeholder paragraph plus a not_generated
+    gap; a near-empty synthesis is dropped), map the cited registry entries
+    to deduped Source records (plan §8.1), renumber citation arrays and
+    rewrite [D#]/[W#] text markers onto those final records (plan §6.3 —
+    positions are 1-based into the deduped array, so they never go out of
+    range), drop sub-heading blocks with no content zone, resolve bare
+    registry keys in citation-note/callout prose to source titles (the
+    bibliography never prints keys, so a prose key would dangle), normalize
+    citation marks (collapse adjacent identical bracket groups, de-bracket
+    registered source titles, drop empty bracket pairs), lint citation
+    format (strip redundant key groups the renderer would double-print,
+    insert missing terminal periods on cited sentence-final spans, collapse
+    repeated clause citations), restore LaTeX backslashes a JSON decode
+    consumed
     (a model `\\t` in JSON becomes a TAB with the `t` gone, leaving
     `<TAB>imes` where `\\times` was — task 10b502cf), decode JSON-style
     unicode escapes in math, promote undelimited display-equation spans to
@@ -1405,6 +1414,11 @@ def assemble_structured_report(
 
     unresolvable = find_unresolvable_citations(report, registry)
     dropped = drop_bare_numeric_citations(report, registry)
+    # Strip degenerate callouts BEFORE the empty-section guard: the guard
+    # must judge the post-strip state, or a section whose only content is a
+    # >=30-word degenerate callout would clear the guard, lose the callout
+    # in this strip, and ship as a bare heading with no placeholder.
+    degenerate_stripped = _strip_degenerate_callouts(report)
 
     not_generated = _apply_empty_section_guards(report)
     orphan_gaps = _drop_orphan_subheadings(report)
@@ -1418,7 +1432,6 @@ def assemble_structured_report(
     key_rewrite_counts = _rewrite_prose_source_keys(report, registry)
     norm_counts = _normalize_citation_marks(report)
     lint_counts = _lint_citation_format(report, registry)
-    degenerate_stripped = _strip_degenerate_callouts(report)
     decoded_escapes = _decode_unicode_escapes(report)
     restored_backslashes = _restore_late_backslash(report)
     _promote_bare_equation_spans(report)
