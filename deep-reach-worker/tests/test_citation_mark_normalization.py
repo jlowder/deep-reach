@@ -369,7 +369,12 @@ def test_assembly_quality_normalized_citations_counters():
         },
         user_query="q",
         session_id="test",
-        exec_paragraphs=[f"The model was released [{EXAONE_TITLE}] with [] appended."],
+        # 30+ words so clean_executive_summary keeps it; the filler words
+        # carry no citation marks, so the counters below are unchanged.
+        exec_paragraphs=[
+            f"The model was released [{EXAONE_TITLE}] with [] appended. "
+            + " ".join(f"fact{i}" for i in range(30))
+        ],
         verification_status={"confidence": "medium", "coverage": "moderate"},
         title="T",
     )

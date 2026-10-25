@@ -493,6 +493,12 @@ def test_decompose_fallback_retries_once_and_keeps_bigger_plan(monkeypatch, caps
     env = _basic_env()
     # json-mode run: the markdown stubs would soft-fail to empty Sections,
     # which the must-revise backstop would then rewrite (changing call counts).
+    # The exec stub must clear clean_executive_summary's 30-word floor, or
+    # the orchestrator's one retry adds a call to the counts asserted below.
+    env["exec_text"] = (
+        "The study found that the treatment reduced recovery time. "
+        + " ".join(f"finding{i}" for i in range(30))
+    )
     env["writer_text"] = lambda i, k: _json_writer(i)
     result = _run_with_decompose_stub(
         monkeypatch, env, decompose_stub, verbose=True
@@ -867,6 +873,12 @@ def test_synthesis_failure_leaves_report_intact(monkeypatch):
 def test_synthesis_skipped_when_too_few_sections(monkeypatch):
     # T4: default plan = 2 sub-questions → synthesis never called.
     env = _basic_env()
+    # The exec stub must clear clean_executive_summary's 30-word floor, or
+    # the orchestrator's one retry adds a call to the counts asserted below.
+    env["exec_text"] = (
+        "The study found that the treatment reduced recovery time. "
+        + " ".join(f"finding{i}" for i in range(30))
+    )
     env["writer_text"] = lambda i, k: _json_writer(i)
     writer_calls = _install_stubs(monkeypatch, env)
     result = dpo.deep_research("test query", verbose=False, max_rounds=3)

@@ -70,6 +70,8 @@ from deep_research_structured import (
     EXEC_SUMMARY_JSON_INSTRUCTIONS,
     assemble_structured_report,
     _content_word_count,
+    _is_structural_garbage,
+    clean_executive_summary,
     parse_exec_summary,
     sections_plain_text,
 )
@@ -1514,24 +1516,41 @@ def deep_research(
                     f"- {heading}: {_one_line_summary(_section_text_str(text))}"
                     for _sid, heading, text in sections
                 )
-                try:
-                    # The call itself is tracked ("synthesis" wrapper) and
-                    # charges the budget — no direct charge here (would
-                    # double-count the same call).
-                    config = get_config()
-                    response = run_model(
-                        instructions=(EXEC_SUMMARY_JSON_INSTRUCTIONS if output_format == "json" else EXEC_SUMMARY_INSTRUCTIONS),
-                        input_data=(
-                            f"User query: {user_query}\n\n"
-                            f"Section summaries of the finished report:\n{summaries}"
-                        ),
-                        reasoning_effort=config.get_reasoning_effort("writer"),
-                        max_output_tokens=config.get_max_output_tokens("writer"),
-                        tools=None,
-                        agent_name="writer",
-                        endpoint=endpoint,
-                        api_key=api_key,
-                    )
+                # Max two attempts: a structurally empty response (code-fence
+                # residue like "```" — the artifact stored by task ce4e9c72,
+                # which rendered as a near-empty Executive Summary callout)
+                # is a formatting failure, not a crash: retry it ONCE. A
+                # hard exception fails without retry, as before; if the
+                # retry is still empty the summary is simply absent (the
+                # optional panel then renders nothing).
+                for _attempt in range(2):
+                    try:
+                        # The call itself is tracked ("synthesis" wrapper)
+                        # and charges the budget — no direct charge here
+                        # (would double-count the same call).
+                        config = get_config()
+                        response = run_model(
+                            instructions=(EXEC_SUMMARY_JSON_INSTRUCTIONS if output_format == "json" else EXEC_SUMMARY_INSTRUCTIONS),
+                            input_data=(
+                                f"User query: {user_query}\n\n"
+                                f"Section summaries of the finished report:\n{summaries}"
+                            ),
+                            reasoning_effort=config.get_reasoning_effort("writer"),
+                            max_output_tokens=config.get_max_output_tokens("writer"),
+                            tools=None,
+                            agent_name="writer",
+                            endpoint=endpoint,
+                            api_key=api_key,
+                        )
+                    except Exception as exc:
+                        # Transient LLM failure: assemble WITHOUT an executive
+                        # summary (sections + references only). Never crash.
+                        stats["exec_summary_failed"] = True
+                        print(
+                            f"[DEEP] WARNING: executive summary call failed "
+                            f"({type(exc).__name__}: {exc}); assembling without one."
+                        )
+                        break
                     summary_prose = (response.output_text or "").strip()
                     # Strip a heading the model may have added anyway.
                     summary_lines = [
@@ -1540,22 +1559,49 @@ def deep_research(
                         if not line.strip().startswith("## ")
                     ]
                     summary_prose = "\n".join(summary_lines).strip()
+                    exec_summary = ""  # per-attempt: never carry residue forward
+                    substantive = False
                     if summary_prose:
-                        # Prose only: save_report's build_enriched_markdown wraps
-                        # the body under its own "## Executive Summary" heading
-                        # (same as standard mode), so the pipeline must not add a
-                        # second one.
+                        # Prose only: save_report's build_enriched_markdown
+                        # wraps the body under its own "## Executive Summary"
+                        # heading (same as standard mode), so the pipeline
+                        # must not add a second one.
                         exec_summary = summary_prose
                         if output_format == "json":
-                            exec_summary_paragraphs = parse_exec_summary(summary_prose)
-                except Exception as exc:
-                    # Transient LLM failure: assemble WITHOUT an executive
-                    # summary (sections + references only). Never crash.
-                    stats["exec_summary_failed"] = True
-                    print(
-                        f"[DEEP] WARNING: executive summary call failed "
-                        f"({type(exc).__name__}: {exc}); assembling without one."
-                    )
+                            # Garbage filter + word floor (mirrors the
+                            # assembly backstop, so a doomed summary does not
+                            # burn the retry for no reason).
+                            exec_summary_paragraphs = clean_executive_summary(
+                                parse_exec_summary(summary_prose)
+                            )
+                            substantive = bool(exec_summary_paragraphs)
+                        else:
+                            # Markdown: gate structural garbage only — no word
+                            # floor, so a short-but-real summary ships exactly
+                            # as before (valid content is byte-identical).
+                            non_garbage = [
+                                p
+                                for p in re.split(r"\n\s*\n", summary_prose)
+                                if p.strip() and not _is_structural_garbage(p)
+                            ]
+                            if not non_garbage:
+                                exec_summary = ""  # whole response was residue
+                            substantive = bool(non_garbage)
+                    if substantive:
+                        break
+                    if _attempt == 0:
+                        print(
+                            "[DEEP] WARNING: executive summary response was "
+                            "structurally empty (code-fence / JSON residue); "
+                            "retrying once."
+                        )
+                    else:
+                        exec_summary = ""
+                        exec_summary_paragraphs = []
+                        print(
+                            "[DEEP] WARNING: executive summary still empty "
+                            "after retry; assembling without one."
+                        )
             else:
                 print(
                     "[DEEP] WARNING: LLM budget exhausted before the executive "

@@ -264,6 +264,48 @@ def parse_exec_summary(text: str) -> list[str]:
     return paragraphs
 
 
+# Minimum TOTAL word count for the optional executive summary to be kept at
+# all. One order of magnitude below the section floor (300): a real summary
+# is 2-4 x 60-120 words by contract, so 30 comfortably rejects fence
+# residue, blank strings, and apology stubs while never rejecting a real one.
+_MIN_EXEC_SUMMARY_TOTAL_WORDS = 30
+
+
+def _is_structural_garbage(text: str) -> bool:
+    """True for a string that is not prose: blank, code-fence residue
+    (``` or a fenced block), or a bare JSON array/object.
+
+    These are the degenerate executive-summary shapes — the stored artifact
+    of task ce4e9c72 was exactly "```" — that the UI would render as a
+    near-empty "Executive Summary" callout.
+    """
+    t = (text or "").strip()
+    if not t:
+        return True
+    if t.count("`") >= 3:  # a fence marker, or a fenced block
+        return True
+    if t.startswith(("[", "{")) and t.endswith(("]", "}")):
+        return True  # the whole paragraph is a JSON array/object
+    return False
+
+
+def clean_executive_summary(paragraphs: "list[str] | None") -> list[str]:
+    """Substantive-content gate for the OPTIONAL executive summary.
+
+    Drops structural garbage (blank / fence residue / bare JSON) and, if the
+    survivors total fewer than _MIN_EXEC_SUMMARY_TOTAL_WORDS words, drops
+    everything (degenerate summary -> absent). The summary is a sibling
+    field of report.sections, so the section-level guards never inspect it,
+    and the UI renders a panel for any non-empty list: "```" must collapse
+    to [], never ship.
+    """
+    cleaned = [p for p in (paragraphs or []) if not _is_structural_garbage(p)]
+    total = sum(len((p or "").split()) for p in cleaned)
+    if total < _MIN_EXEC_SUMMARY_TOTAL_WORDS:
+        return []
+    return cleaned
+
+
 def _iter_citation_holders(block: ReportBlock):
     """Yield every object in a block that owns a .citations list:
     paragraph/callout/citation_note spans, list items, and table cells."""
@@ -1403,7 +1445,10 @@ def assemble_structured_report(
                 author="Research Assistant",
                 report_type="deep_research",
             ),
-            executive_summary=list(exec_paragraphs or []),
+            # Optional sibling of sections (the section guards above never
+            # inspect it): collapse garbage / sub-floor summaries to absent
+            # so the UI panel renders nothing instead of "```".
+            executive_summary=clean_executive_summary(exec_paragraphs or []),
             sections=list(sections or []),
             sources=[],
         ),

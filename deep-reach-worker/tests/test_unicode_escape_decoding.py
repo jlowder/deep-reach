@@ -365,7 +365,11 @@ def test_assembly_quality_counter():
         registry={},
         user_query="q",
         session_id="test",
-        exec_paragraphs=[r"summary $\u2014$ marked"],
+        # 30+ words so clean_executive_summary keeps it; the filler words
+        # carry no escapes, so the counter below is unchanged.
+        exec_paragraphs=[
+            r"summary $\u2014$ marked " + " ".join(f"word{i}" for i in range(30))
+        ],
         verification_status={"confidence": "high", "coverage": "full"},
         title="T",
     )
@@ -385,7 +389,9 @@ def test_assembly_quality_counter():
         "exactly the well-behaved strata, which justifies sustaining the "
         "program overall despite its open strands."
     )
-    assert report.report.executive_summary[0] == "summary — marked"
+    assert report.report.executive_summary[0] == (
+        "summary \u2014 marked " + " ".join(f"word{i}" for i in range(30))
+    )
 
 
 # ---------------------------------------------------------------------------

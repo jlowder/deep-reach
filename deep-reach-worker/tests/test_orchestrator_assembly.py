@@ -119,6 +119,13 @@ def _pad_span(n: int = 40):
     return (" ".join(f"fact{i}" for i in range(n)), [])
 
 
+# Contract-sized executive summary paragraphs (60 words each): realistic
+# enough to clear clean_executive_summary's 30-word floor. The historical
+# "Ex." / "Para one." stubs predate that floor and would now be dropped.
+EXEC_PARA = "alpha " + " ".join(f"token{i}" for i in range(59))
+EXEC_PARA_B = "beta " + " ".join(f"token{i}" for i in range(59))
+
+
 def _all_citations(rep: ResearchReport):
     return [
         c
@@ -184,7 +191,7 @@ class TestAssemble:
             registry=registry,
             user_query="q",
             session_id="s1",
-            exec_paragraphs=["Ex."],
+            exec_paragraphs=[EXEC_PARA],
             verification_status={"confidence": "high"},
             title="T",
         )
@@ -223,7 +230,7 @@ class TestAssemble:
         s1 = Section(id="s1", heading="One", blocks=[_para([("A fact here.", ["W1"]), _pad_span()])])
         rep = self._assemble(s1, registry={"W1": dict(WEB_A)})
         assert rep.report.metadata.title == "T"
-        assert rep.report.executive_summary == ["Ex."]
+        assert rep.report.executive_summary == [EXEC_PARA]
         assert rep.quality.sources_count == {"documents": 0, "web": 1}
         assert rep.quality.total_words > 0
         assert rep.quality.verification.get("confidence") == "high"
@@ -240,8 +247,8 @@ class TestAssemble:
         assert notice.type == BlockType.paragraph
         assert "no content was generated" in notice.spans[0].text
         assert rep.report.sources == []
-        # 1 exec word + 19 gap-notice words (no blocks otherwise).
-        assert rep.quality.total_words == 20
+        # 60 exec words + 19 gap-notice words (no blocks otherwise).
+        assert rep.quality.total_words == 79
         assert rep.quality.verification["gaps"] == ["not_generated: Empty"]
         assert isinstance(rep.quality.citation_density, dict)
 
@@ -253,7 +260,7 @@ class TestCitationRemap:
             registry=registry,
             user_query="q",
             session_id="s1",
-            exec_paragraphs=["Ex."],
+            exec_paragraphs=[EXEC_PARA],
             verification_status={"confidence": "high"},
             title="T",
         )
@@ -508,7 +515,7 @@ def _install_json_stubs(monkeypatch):
     )
     monkeypatch.setattr(
         dpo, "run_model",
-        lambda *a, **k: _FakeResponse(text=json.dumps(["Para one.", "Para two."])),
+        lambda *a, **k: _FakeResponse(text=json.dumps([EXEC_PARA, EXEC_PARA_B])),
     )
     return calls
 
@@ -534,7 +541,7 @@ def test_deep_research_json_mode_e2e(monkeypatch):
     assert rep.report.metadata.query == "test research query"
 
     # Executive summary parsed from the JSON array.
-    assert rep.report.executive_summary == ["Para one.", "Para two."]
+    assert rep.report.executive_summary == [EXEC_PARA, EXEC_PARA_B]
 
     # Sections preserved in order.
     assert [s.heading for s in rep.report.sections] == [
@@ -593,7 +600,7 @@ def test_assemble_guards_preserve_existing_gaps_and_drop_empty_synthesis():
         registry={},
         user_query="q",
         session_id="s1",
-        exec_paragraphs=["Ex."],
+        exec_paragraphs=[EXEC_PARA],
         verification_status={"gaps": ["existing gap"]},
         title="T",
     )
@@ -651,7 +658,7 @@ def test_short_content_section_titled_synthesis_gets_gap_notice():
         registry={},
         user_query="q",
         session_id="s1",
-        exec_paragraphs=["Ex."],
+        exec_paragraphs=[EXEC_PARA],
         verification_status={},
         title="T",
     )
@@ -677,7 +684,7 @@ def test_short_section_with_synthesis_id_dropped():
         registry={},
         user_query="q",
         session_id="s1",
-        exec_paragraphs=["Ex."],
+        exec_paragraphs=[EXEC_PARA],
         verification_status={},
         title="T",
     )
